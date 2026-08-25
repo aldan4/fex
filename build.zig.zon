@@ -1,0 +1,45 @@
+.{
+    .name = .fex,
+    .version = "0.1.0",
+    .fingerprint = 0xf54f086c9f42a9fc,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .doctest = .{
+            .url = "https://github.com/doctest/doctest/archive/refs/tags/v2.4.12.tar.gz",
+            .hash = "N-V-__8AAIVNNwDmACXf-T5aWPMuVqSaksnF74yoBBnafoTi",
+        },
+        .nanobench = .{
+            .url = "https://github.com/martinus/nanobench/archive/refs/tags/v4.3.11.tar.gz",
+            .hash = "N-V-__8AAC7MXABFFs1OnCXVEqf2ONJ_PwSWELA1BRHKf-Rr",
+        },
+        .unordered_dense = .{
+            .url = "https://github.com/martinus/unordered_dense/archive/refs/tags/v4.9.2.tar.gz",
+            .hash = "N-V-__8AACGfpwBk7CqBNCS2lr8THfMdpHBOCGr2tvF408Yt",
+        },
+        .ascon_c = .{
+            .url = "https://github.com/ascon/ascon-c/archive/446347f21b20.tar.gz",
+            .hash = "N-V-__8AAHcFrwCbEczRJYoc-g0P7wPKqhMBCH-vPgfQwG1O",
+        },
+        .tweetnacl = .{
+            .url = "https://github.com/ultramancool/tweetnacl-usable/archive/a8dcaa769d79b0.tar.gz",
+            .hash = "N-V-__8AALGaAAD2RsLgtavP9FjnKDs_1dXBpW5T5OU5IkJ2",
+        },
+        .dano = .{
+            .url = "https://github.com/aldan4/dano/archive/e280c3cd41b94e849feff0cbc49adfe0bba8df0d.tar.gz",
+            .hash = "dano-0.1.0-qIvuFU5-AQDXWDobJkG45h9IUdR0fc1MdGJay1mRlj_b",
+        },
+        .flags = .{
+            .url = "https://github.com/sailormoon/flags/archive/refs/tags/v1.2.tar.gz",
+            .hash = "N-V-__8AAJSQAACCxwRuv2_qERWX_bLOuWnapoaAtDm4qv2S",
+        },
+    },
+    .paths = .{
+        "LICENSE",
+        "build.zig",
+        "build.zig.zon",
+        "include",
+        "src",
+        "test",
+        "bench",
+    },
+}
