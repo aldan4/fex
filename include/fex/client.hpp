@@ -9,6 +9,6 @@
 #include <fex/client/config.hpp>
 #include <fex/client/publish.hpp>
 #include <fex/client/requester.hpp>
-#include <fex/client/restore.hpp>
+#include <fex/client/fetch.hpp>
 #include <fex/client/snapshot.hpp>
 #include <fex/protocol.hpp>

@@ -4,10 +4,16 @@
 #pragma once
 
 // Client layout discovery (#10.3):
-//   <root>/self/<name>@<relay>/   the capsule
-//   <root>/keys/node.dano         the node identity
-//   <root>/keys/<relay>.relay.dano
-//   <root>/tmp/                   restore staging, cleaned at start
+//   <root>/keys/node.dano                    the node identity
+//   <root>/keys/<relay>.relay.dano           the relay's card
+//   <root>/self/<name>@<relay>/files/        the capsule: content only
+//   <root>/self/<name>@<relay>/files/inventory.danl
+//                                            the relay's inventory as last known
+//   <root>/self/<name>@<relay>/state/staging/  downloads in progress
+//
+// A capsule is still discovered by its <name>@<relay> directory; files/ and state/
+// live inside it, which is what puts a download on the same filesystem as the place
+// it is renamed to.
 
 #include <cstdlib>
 #include <expected>
@@ -26,15 +32,28 @@
 
 namespace fex::client {
 
+inline constexpr std::string_view staging_name = "staging";
+
 struct config {
     std::string root;
     identity self;
     identity_card relay;
     std::string relay_name;
     std::string capsule_name;
-    std::string capsule_dir; // <root>/self/<name>@<relay>
-    std::string tmp_dir;     // <root>/tmp
+    std::string files_dir; // <root>/self/<name>@<relay>/files
+    std::string state_dir; // <root>/self/<name>@<relay>/state
 }; // config
+
+// Where a download is written before it is renamed into place, and where the
+// client keeps the relay's inventory. Both are spelled once, here, so a second
+// capsule -- another member's, when the protocol grows one -- needs no new rule.
+[[nodiscard]] inline std::string staging_dir(std::string_view state_dir) {
+    return std::string{state_dir} + '/' + std::string{staging_name};
+}
+
+[[nodiscard]] inline std::string inventory_path(std::string_view files_dir) {
+    return std::string{files_dir} + '/' + std::string{inventory_name};
+}
 
 namespace detail {
 
@@ -103,8 +122,9 @@ load_config(std::string_view root_flag, std::string_view relay_flag,
     }
     if (!is_valid_segment(cfg.capsule_name))
         return std::unexpected(std::errc::invalid_argument);
-    cfg.capsule_dir = cfg.root + "/self/" + cfg.capsule_name + '@' + cfg.relay_name;
-    cfg.tmp_dir = cfg.root + "/tmp";
+    const auto capsule = cfg.root + "/self/" + cfg.capsule_name + '@' + cfg.relay_name;
+    cfg.files_dir = capsule + "/files";
+    cfg.state_dir = capsule + "/state";
     return cfg;
 }
 
@@ -132,13 +152,17 @@ SCENARIO("config discovery") {
     REQUIRE(write_new_file((root + "/keys/hub.relay.dano").c_str(),
                            to_dano(card_of(relay, "127.0.0.1:4444")),
                            identity_card_mode).has_value());
-    REQUIRE(fs::ensure_dirs(root + "/self/mine@hub").has_value());
+    REQUIRE(fs::ensure_dirs(root + "/self/mine@hub/files").has_value());
 
     auto cfg = client::load_config(root, "", "");
     REQUIRE(cfg.has_value());
     CHECK(cfg->relay_name == "hub");
     CHECK(cfg->capsule_name == "mine");
-    CHECK(cfg->capsule_dir == root + "/self/mine@hub");
+    CHECK(cfg->files_dir == root + "/self/mine@hub/files");
+    CHECK(cfg->state_dir == root + "/self/mine@hub/state");
+    CHECK(client::staging_dir(cfg->state_dir) == root + "/self/mine@hub/state/staging");
+    CHECK(client::inventory_path(cfg->files_dir)
+          == root + "/self/mine@hub/files/inventory.danl");
     CHECK(cfg->relay.addr == "127.0.0.1:4444");
     CHECK(cfg->self.pub == self.pub);
 
@@ -154,7 +178,7 @@ SCENARIO("config discovery") {
     // --name overrides discovery
     auto named = client::load_config(root, "hub", "fresh");
     REQUIRE(named.has_value());
-    CHECK(named->capsule_dir == root + "/self/fresh@hub");
+    CHECK(named->files_dir == root + "/self/fresh@hub/files");
 
     REQUIRE(fs::remove_tree(root).has_value());
 }

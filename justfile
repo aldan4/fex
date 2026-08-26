@@ -61,22 +61,22 @@ bench:
 
 # Unlike `test`, which runs a relay in-process, this drives the shipped executables
 # over loopback and exercises the on-disk layouts of #6 and #10.3. It generates keys,
-# lays out a relay root and two client roots, then publishes, restores, mutates and
-# converges. {{smoke_dir}} is removed on success and left behind for inspection on
-# failure; the relay is stopped either way.
+# lays out a relay root and two client roots, then publishes, fetches, mutates and
+# reads back again. {{smoke_dir}} is removed on success and left behind for
+# inspection on failure; the relay is stopped either way.
 #
 # It depends on build-release-host rather than build-release: the latter installs
 # into {{macos_out}} and {{linux_out}}, leaving whatever happens to sit in
 # zig-out/bin for {{bin}} to run.
 
-# End-to-end check with the optimized binaries: publish, restore, mutate, converge
+# End-to-end check with the optimized binaries: publish, inventory, fetch, mutate
 smoke: build-release-host
     #!/usr/bin/env bash
     set -euo pipefail
     demo="{{smoke_dir}}"
     addr="127.0.0.1:{{smoke_port}}"
-    capsule="$demo/alice/self/notes@relay1"
-    replica="$demo/alice2/self/notes@relay1"
+    capsule="$demo/alice/self/notes@relay1/files"
+    replica="$demo/alice2/self/notes@relay1/files"
     server=""
     cleanup() {
         if [ -n "$server" ]; then kill "$server" 2>/dev/null || true; fi
@@ -118,10 +118,29 @@ smoke: build-release-host
     {{client_bin}} publish --root "$demo/alice" | tee "$demo/out" | sed "s/^/    /"
     grep -q "already published" "$demo/out"
 
-    echo "==> restore into a second root"
-    {{client_bin}} restore --root "$demo/alice2" --name notes | sed "s/^/    /"
+    echo "==> what the relay holds, from a second root"
+    {{client_bin}} inventory --root "$demo/alice2" --name notes | tee "$demo/out" | sed "s/^/    /"
+    grep -q "seq 1, 2 files" "$demo/out"
+    grep -q "docs/readme.txt  10" "$demo/out"
+    grep -q "blob.bin  2000000" "$demo/out"
+
+    echo "==> the same file, fetched by name and read out with its hashes"
+    {{client_bin}} fetch inventory.danl --root "$demo/alice2" --name notes | tee "$demo/out" | sed "s/^/    /"
+    grep -q "already up to date" "$demo/out"   # the inventory command just fetched it
+    sed "s/^/    /" "$replica/inventory.danl"
+    grep -q ':path "docs/readme.txt" :size 10' "$replica/inventory.danl"
+    grep -q ':path "blob.bin" :size 2000000' "$replica/inventory.danl"
+
+    echo "==> fetch both files into it"
+    {{client_bin}} fetch docs/readme.txt --root "$demo/alice2" --name notes | sed "s/^/    /"
+    {{client_bin}} fetch blob.bin        --root "$demo/alice2" --name notes | sed "s/^/    /"
     diff -r "$capsule" "$replica"
+    cmp "$capsule/inventory.danl" "$replica/inventory.danl"
     echo "    trees identical"
+
+    echo "==> fetching an unchanged file downloads nothing"
+    {{client_bin}} fetch blob.bin --root "$demo/alice2" --name notes | tee "$demo/out" | sed "s/^/    /"
+    grep -q "already up to date" "$demo/out"
 
     echo "==> mutate: edit one file, delete one, add one"
     echo "hello fex, edited" > "$capsule/docs/readme.txt"
@@ -131,11 +150,19 @@ smoke: build-release-host
     {{client_bin}} publish --root "$demo/alice" | tee "$demo/out" | sed "s/^/    /"
     grep -q "as seq 2" "$demo/out"
 
-    echo "==> restore converges, deletion included"
-    {{client_bin}} restore --root "$demo/alice2" --name notes | sed "s/^/    /"
-    diff -r "$capsule" "$replica"
-    test ! -e "$replica/blob.bin"
-    echo "    trees identical"
+    echo "==> the inventory follows, and fetch takes nothing away"
+    {{client_bin}} inventory --root "$demo/alice2" --name notes | tee "$demo/out" | sed "s/^/    /"
+    grep -q "seq 2, 2 files" "$demo/out"
+    ! grep -q "blob.bin" "$demo/out"
+    ! grep -q "blob.bin" "$replica/inventory.danl"
+    {{client_bin}} fetch docs/readme.txt --root "$demo/alice2" --name notes | sed "s/^/    /"
+    {{client_bin}} fetch new/note.txt    --root "$demo/alice2" --name notes | sed "s/^/    /"
+    cmp "$capsule/docs/readme.txt" "$replica/docs/readme.txt"
+    cmp "$capsule/new/note.txt" "$replica/new/note.txt"
+    cmp "$capsule/inventory.danl" "$replica/inventory.danl"
+    test -e "$replica/blob.bin"          # what left the inventory is still standing
+    test -z "$(ls "$demo/alice2/self/notes@relay1/state/staging")"
+    echo "    what was asked for arrived, and nothing else moved"
 
     echo "==> relay state"
     sed "s/^/    /" "$demo/relay/capsules/alice/head.dano"

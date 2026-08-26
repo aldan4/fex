@@ -53,7 +53,7 @@ inline std::expected<client::config, int> configure(const flags::args& args) {
 // the option block every command that talks to a relay shares
 inline constexpr std::string_view relay_options =
     "  -r, --root <path>       client root (default: $FEX_ROOT, then current);\n"
-    "                          holds keys/, self/, tmp/\n"
+    "                          holds keys/ and self/\n"
     "      --relay <name>      relay to use when keys/ has several *.relay.dano\n"
     "      --name <name>       capsule name when self/ does not pin one\n";
 

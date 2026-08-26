@@ -4,14 +4,16 @@
 #pragma once
 
 // Publication (#10.1): snapshot -> peek/head -> put/poll per file -> inventory ->
-// commit. Everything is uploaded strictly from the snapshot: a file that
-// changes on disk mid-flight fails its hash check and restarts the run.
+// commit -> write files/inventory.danl. Everything is uploaded strictly from the
+// snapshot: a file that changes on disk mid-flight fails its hash check and restarts
+// the run.
 
 #include <cstdint>
 #include <expected>
 #include <string>
 #include <vector>
 
+#include <fex/client/config.hpp>
 #include <fex/client/requester.hpp>
 #include <fex/client/snapshot.hpp>
 #include <fex/inventory.hpp>
@@ -140,12 +142,19 @@ send_commit(requester& r, u64 seq, const hash256& h) noexcept {
 } // namespace detail
 
 [[nodiscard]] inline std::expected<publish_report, std::errc>
-publish(requester& r, const std::string& capsule_dir,
+publish(requester& r, const std::string& files_dir,
         std::string* offending = nullptr) noexcept {
+    // What the relay now holds, kept where the member can read it (#10.1 step 6).
+    // The commit is what publishes; this is a record of it, so a failure to write it
+    // is reported and does not unmake what the relay has already accepted.
+    const auto keep_inventory =
+        [&](fex::bytes inv_bytes) -> std::expected<void, std::errc> {
+            return fs::write_file_atomic(inventory_path(files_dir), inv_bytes);
+        };
     const int max_restarts = r.options().max_restarts;
     for (int attempt = 0; attempt != max_restarts; ++attempt) {
         // step 1: the snapshot fixes the whole inventory
-        auto inv = snapshot(capsule_dir, offending);
+        auto inv = snapshot(files_dir, offending);
         if (!inv)
             return std::unexpected(inv.error());
         const auto inv_text = inventory::to_danl(*inv);
@@ -158,8 +167,11 @@ publish(requester& r, const std::string& capsule_dir,
             return std::unexpected(head.error());
         hash256 remote;
         std::copy(head->inv_hash, head->inv_hash + 32, remote.begin());
-        if (remote == inv_hash)
+        if (remote == inv_hash) {
+            if (const auto kept = keep_inventory(fex::bytes{inv_bytes}); !kept)
+                return std::unexpected(kept.error());
             return publish_report{head->seq, true};
+        }
 
         // step 3: every new non-empty file, once per distinct hash
         bool restart = false;
@@ -167,7 +179,7 @@ publish(requester& r, const std::string& capsule_dir,
         for (const auto& e : inv->entries) {
             if (e.size == 0 || !done.emplace(e.hash).second)
                 continue;
-            auto data = fs::read_file((capsule_dir + '/' + e.path).c_str());
+            auto data = fs::read_file((files_dir + '/' + e.path).c_str());
             if (!data
                 || crypto::ascon::hash256(fex::bytes{*data}) != e.hash) {
                 restart = true; // the folder moved under us: retake the snapshot
@@ -201,8 +213,11 @@ publish(requester& r, const std::string& capsule_dir,
             const auto status = detail::send_commit(r, seq, inv_hash);
             if (!status)
                 return std::unexpected(status.error());
-            if (*status == wire::mstatus::ok)
+            if (*status == wire::mstatus::ok) {
+                if (const auto kept = keep_inventory(fex::bytes{inv_bytes}); !kept)
+                    return std::unexpected(kept.error());
                 return publish_report{seq, false};
+            }
             if (*status == wire::mstatus::stale_seq && tries == 0) {
                 const auto fresh = r.peek();
                 if (!fresh)

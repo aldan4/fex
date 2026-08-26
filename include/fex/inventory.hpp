@@ -50,21 +50,25 @@ struct file {
     return true;
 }
 
-// canonical form: key order :hash :path :size, single spaces, lowercase hex,
-// entries sorted by path bytewise, '\n' after every line including the last
+// canonical form: key order :path :size :hash, single spaces, lowercase hex,
+// entries sorted by path bytewise, '\n' after every line including the last.
+//
+// The path leads because this file is read by people as well as by parsers: a
+// member reads it to find out what to fetch, and what they are looking for should
+// not sit behind sixty-four hex digits (#7, #10.2).
 [[nodiscard]] inline std::string to_danl(file inv) {
     std::ranges::sort(inv.entries, [](const entry& a, const entry& b) {
         return a.path < b.path; // lowercase ascii, so char compare is bytewise
     });
     std::string out;
     for (const auto& e : inv.entries) {
-        out += "{:hash \"";
-        out += to_hex(fex::bytes{e.hash});
-        out += "\" :path \"";
+        out += "{:path \"";
         out += e.path;
         out += "\" :size ";
         out += std::to_string(e.size);
-        out += "}\n";
+        out += " :hash \"";
+        out += to_hex(fex::bytes{e.hash});
+        out += "\"}\n";
     }
     return out;
 }
@@ -158,10 +162,10 @@ SCENARIO("canonical output") {
     inv.entries.push_back({hash_of(0x01), "a.txt", 0});
     const auto text = inventory::to_danl(inv);
     const std::string expected =
-        "{:hash \"0101010101010101010101010101010101010101010101010101010101010101\""
-        " :path \"a.txt\" :size 0}\n"
-        "{:hash \"abababababababababababababababababababababababababababababababab\""
-        " :path \"docs/z.txt\" :size 10}\n";
+        "{:path \"a.txt\" :size 0"
+        " :hash \"0101010101010101010101010101010101010101010101010101010101010101\"}\n"
+        "{:path \"docs/z.txt\" :size 10"
+        " :hash \"abababababababababababababababababababababababababababababababab\"}\n";
     CHECK(text == expected);
     // empty inventory maps to empty text
     CHECK(inventory::to_danl({}) == "");
@@ -216,6 +220,9 @@ SCENARIO("rejection matrix") {
     using namespace fex;
     const std::string good_hash =
         "2222222222222222222222222222222222222222222222222222222222222222";
+    // Deliberately not the canonical key order: #7 asks a reader to take the three
+    // keys in any order, and writing these the other way round is what keeps the
+    // reader from quietly growing a dependency on the order the writer uses.
     const auto line = [&](std::string_view hash, std::string_view path,
                           std::string_view size) {
         std::string s = "{:hash \"";

@@ -3,9 +3,10 @@
 
 // fex -- the capsule client. Verb goes first: fex <command> [options].
 
+#include <fex/commands/fetch.hpp>
 #include <fex/commands/generate.hpp>
+#include <fex/commands/inventory.hpp>
 #include <fex/commands/publish.hpp>
-#include <fex/commands/restore.hpp>
 
 #include <flags.h>
 
@@ -23,11 +24,13 @@ std::string usage() {
     std::string text = "fex -- capsule client\n\nusage:\n";
     text += generate::synopsis;
     text += publish::synopsis;
-    text += restore::synopsis;
+    text += inventory::synopsis;
+    text += fetch::synopsis;
     text += "  fex help | version\n\ncommands:\n";
     text += generate::summary;
     text += publish::summary;
-    text += restore::summary;
+    text += inventory::summary;
+    text += fetch::summary;
     text += "  help                    this text\n"
             "  version                 print the version\n";
     text += "\noptions:\n";
@@ -57,7 +60,8 @@ int main(int argc, char** argv) {
 
     if (command == generate::name) return generate::run(args);
     if (command == publish::name) return publish::run(args);
-    if (command == restore::name) return restore::run(args);
+    if (command == inventory::name) return inventory::run(args);
+    if (command == fetch::name) return fetch::run(args);
 
     fail("unknown command '{}'", command);
     std::print(stderr, "{}", usage());

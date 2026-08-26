@@ -37,9 +37,43 @@ inline std::string tree_fingerprint(const std::string& dir) {
     return fex::inventory::to_danl(*inv);
 }
 
+// every entry of a listing, fetched into the capsule it belongs to
+inline void fetch_all(fex::client::requester& r, const fex::client::published& state,
+                      const std::string& files_dir, const std::string& state_dir) {
+    for (const auto& e : state.inventory.entries) {
+        const auto got = fex::client::fetch(r, e, files_dir, state_dir);
+        REQUIRE(got.has_value());
+        CHECK(*got); // nothing was there before, so every one is a download
+    }
+}
+
+inline bool names(const fex::inventory::file& inv, std::string_view path) {
+    for (const auto& e : inv.entries)
+        if (e.path == path) return true;
+    return false;
+}
+
+inline const fex::inventory::entry& record(const fex::inventory::file& inv,
+                                           std::string_view path) {
+    for (const auto& e : inv.entries)
+        if (e.path == path) return e;
+    REQUIRE(false);
+    return inv.entries.front();
+}
+
+inline std::size_t files_in(const std::string& dir) {
+    std::size_t n = 0;
+    (void)fex::fs::walk(dir.c_str(),
+        [&](std::string_view, const fex::fs::info& st) -> std::expected<void, std::errc> {
+            if (st.kind == fex::fs::entry_kind::file) ++n;
+            return {};
+        });
+    return n;
+}
+
 } // namespace fex_e2e_test
 
-SCENARIO("end to end: publish, restore, mutate, converge") {
+SCENARIO("end to end: publish, list, fetch, mutate, converge") {
     using namespace fex;
     using namespace fex_e2e_test;
     char tmpl[] = "/tmp/fex-e2e-XXXXXX";
@@ -48,7 +82,7 @@ SCENARIO("end to end: publish, restore, mutate, converge") {
     const std::string base{tmp};
     const auto relay_root = base + "/relay";
     const auto root_a = base + "/a"; // publisher
-    const auto root_b = base + "/b"; // restorer
+    const auto root_b = base + "/b"; // reader
 
     // identities and cards (#3)
     const auto relay_id = generate_identity();
@@ -77,7 +111,8 @@ SCENARIO("end to end: publish, restore, mutate, converge") {
     }
 
     // a capsule with nested dirs, an empty file, duplicate content, > 1 MiB
-    const auto capsule_a = root_a + "/self/mine@hub";
+    const auto capsule_a = root_a + "/self/mine@hub/files";
+    const auto state_a = root_a + "/self/mine@hub/state";
     const auto big = pattern(1024 * 1024 + 137, 1);
     const auto small = pattern(2048 + 100, 2);
     put_file(capsule_a + "/docs/x.txt", {'h', 'e', 'l', 'l', 'o'});
@@ -92,7 +127,7 @@ SCENARIO("end to end: publish, restore, mutate, converge") {
     REQUIRE(req_a.has_value());
 
     // publish -> seq 1, tree on the relay is byte-identical
-    auto published = client::publish(*req_a, cfg_a->capsule_dir);
+    auto published = client::publish(*req_a, cfg_a->files_dir);
     REQUIRE(published.has_value());
     CHECK(published->seq == 1);
     CHECK(!published->unchanged);
@@ -100,16 +135,51 @@ SCENARIO("end to end: publish, restore, mutate, converge") {
     CHECK(tree_fingerprint(relay_tree) == tree_fingerprint(capsule_a));
     CHECK(*fs::read_file((relay_tree + "/big.bin").c_str()) == big);
 
-    // restore into a fresh root -> byte-identical
+    // publishing left the inventory where the member can read it, and it is not a
+    // record of the capsule it describes
+    const auto inv_a = client::inventory_path(cfg_a->files_dir);
+    CHECK(fs::stat_of(inv_a.c_str()).kind == fs::entry_kind::file);
+    CHECK(tree_fingerprint(capsule_a) == inventory::to_danl(*client::snapshot(capsule_a)));
+    CHECK(std::string{reinterpret_cast<const char*>(fs::read_file(inv_a.c_str())->data()),
+                      fs::read_file(inv_a.c_str())->size()}
+          == tree_fingerprint(capsule_a));
+
+    // list from a fresh root: the head, then the inventory it names
     auto cfg_b = client::load_config(root_b, "", "mine");
     REQUIRE(cfg_b.has_value());
     auto req_b = client::requester::connect(cfg_b->self, cfg_b->relay);
     REQUIRE(req_b.has_value());
-    REQUIRE(client::restore(*req_b, cfg_b->capsule_dir, cfg_b->tmp_dir).has_value());
-    CHECK(tree_fingerprint(cfg_b->capsule_dir) == tree_fingerprint(capsule_a));
+    auto state = client::refresh_inventory(*req_b, cfg_b->files_dir, cfg_b->state_dir);
+    REQUIRE(state.has_value());
+    CHECK(state->seq == 1);
+    CHECK(inventory::to_danl(state->inventory) == tree_fingerprint(capsule_a));
+    CHECK(*fs::read_file(client::inventory_path(cfg_b->files_dir).c_str())
+          == *fs::read_file(inv_a.c_str()));
+
+    // and fetch: every record into the place the inventory names
+    fetch_all(*req_b, *state, cfg_b->files_dir, cfg_b->state_dir);
+    CHECK(tree_fingerprint(cfg_b->files_dir) == tree_fingerprint(capsule_a));
+    CHECK(files_in(client::staging_dir(cfg_b->state_dir)) == 0);
+
+    // a second fetch of the same record downloads nothing
+    {
+        const auto again = client::fetch(*req_b, record(state->inventory, "big.bin"),
+                                         cfg_b->files_dir, cfg_b->state_dir);
+        REQUIRE(again.has_value());
+        CHECK(!*again);
+    }
+
+    // listing again keeps the inventory already on disk (same hash, no transfer)
+    {
+        const auto before = fs::stat_of(client::inventory_path(cfg_b->files_dir).c_str());
+        auto second = client::refresh_inventory(*req_b, cfg_b->files_dir, cfg_b->state_dir);
+        REQUIRE(second.has_value());
+        const auto after = fs::stat_of(client::inventory_path(cfg_b->files_dir).c_str());
+        CHECK(before.mtime_ns == after.mtime_ns);
+    }
 
     // unchanged re-publish exits early on the matching inventory hash
-    published = client::publish(*req_a, cfg_a->capsule_dir);
+    published = client::publish(*req_a, cfg_a->files_dir);
     REQUIRE(published.has_value());
     CHECK(published->unchanged);
     CHECK(published->seq == 1);
@@ -122,23 +192,65 @@ SCENARIO("end to end: publish, restore, mutate, converge") {
     REQUIRE(::rename((capsule_a + "/big.bin").c_str(),
                      (capsule_a + "/moved.bin").c_str()) == 0);
 
-    published = client::publish(*req_a, cfg_a->capsule_dir);
+    published = client::publish(*req_a, cfg_a->files_dir);
     REQUIRE(published.has_value());
     CHECK(published->seq == 2);
     CHECK(tree_fingerprint(relay_tree) == tree_fingerprint(capsule_a));
     CHECK(fs::stat_of((relay_tree + "/big.bin").c_str()).kind == fs::entry_kind::missing);
     CHECK(fs::stat_of((relay_tree + "/deep").c_str()).kind == fs::entry_kind::missing);
 
-    // the stale replica converges, deletions included; the rename arrives as a
-    // local copy, not a download
-    REQUIRE(client::restore(*req_b, cfg_b->capsule_dir, cfg_b->tmp_dir).has_value());
-    CHECK(tree_fingerprint(cfg_b->capsule_dir) == tree_fingerprint(capsule_a));
-    CHECK(fs::stat_of((cfg_b->capsule_dir + "/deep").c_str()).kind
-          == fs::entry_kind::missing);
-    CHECK(*fs::read_file((cfg_b->capsule_dir + "/moved.bin").c_str()) == big);
+    // the reader sees seq 2: the paths that went are gone from the listing, the new
+    // ones are in it, and what it fetches is what the publisher has
+    state = client::refresh_inventory(*req_b, cfg_b->files_dir, cfg_b->state_dir);
+    REQUIRE(state.has_value());
+    CHECK(state->seq == 2);
+    CHECK(!names(state->inventory, "big.bin"));
+    CHECK(!names(state->inventory, "deep/copy2.bin"));
+    CHECK(names(state->inventory, "moved.bin"));
+    CHECK(names(state->inventory, "new/nested/y.txt"));
 
-    // restoring right over an up-to-date tree is a no-op that still succeeds
-    REQUIRE(client::restore(*req_b, cfg_b->capsule_dir, cfg_b->tmp_dir).has_value());
+    {
+        const auto got = client::fetch(*req_b, record(state->inventory, "moved.bin"),
+                                       cfg_b->files_dir, cfg_b->state_dir);
+        REQUIRE(got.has_value());
+        CHECK(*got);
+        CHECK(*fs::read_file((cfg_b->files_dir + "/moved.bin").c_str()) == big);
+    }
+    {
+        const auto got = client::fetch(*req_b, record(state->inventory, "docs/x.txt"),
+                                       cfg_b->files_dir, cfg_b->state_dir);
+        REQUIRE(got.has_value());
+        CHECK(*got); // the file there holds "hello", the relay has "world!"
+        const std::vector<u8> edited{'w', 'o', 'r', 'l', 'd', '!'};
+        CHECK(*fs::read_file((cfg_b->files_dir + "/docs/x.txt").c_str()) == edited);
+    }
+
+    // fetch deletes nothing: what left the inventory is still standing locally
+    CHECK(fs::stat_of((cfg_b->files_dir + "/big.bin").c_str()).kind
+          == fs::entry_kind::file);
+
+    // a record of size zero must carry the hash of nothing at all
+    {
+        inventory::entry forged = record(state->inventory, "empty.bin");
+        forged.hash[0] ^= 0xff;
+        forged.path = "forged.bin";
+        const auto refused = client::fetch(*req_b, forged, cfg_b->files_dir,
+                                           cfg_b->state_dir);
+        REQUIRE(!refused.has_value());
+        CHECK(refused.error() == std::errc::bad_message);
+    }
+
+    // a hash the relay does not hold is refused, and leaves no staging file behind
+    {
+        inventory::entry absent = record(state->inventory, "moved.bin");
+        absent.hash[0] ^= 0xff;
+        absent.path = "absent.bin";
+        const auto refused = client::fetch(*req_b, absent, cfg_b->files_dir,
+                                           cfg_b->state_dir);
+        REQUIRE(!refused.has_value());
+        CHECK(refused.error() == std::errc::no_such_file_or_directory);
+        CHECK(files_in(client::staging_dir(cfg_b->state_dir)) == 0);
+    }
 
     srv.stop();
     runner.join();

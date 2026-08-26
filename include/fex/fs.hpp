@@ -197,6 +197,56 @@ write_file_atomic(std::string_view final_path, fex::bytes data,
     return {};
 }
 
+// A file's hash, read a block at a time. Nothing here holds the file: a capsule may
+// carry more than this machine has memory for, and only the sponge sees all of it.
+[[nodiscard]] inline std::expected<hash256, std::errc> hash_file(const char* path) noexcept {
+    const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return failure();
+    crypto::ascon::hash256_stream h;
+    std::vector<u8> block(64 * 1024);
+    for (;;) {
+        const auto n = ::read(fd, block.data(), block.size());
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            const auto e = last_errc();
+            ::close(fd);
+            return std::unexpected(e);
+        }
+        if (n == 0)
+            break;
+        h.update(fex::bytes{block.data(), static_cast<std::size_t>(n)});
+    }
+    ::close(fd);
+    return h.final();
+}
+
+// A file opened to be written from nothing, for a download that arrives in pieces and
+// is renamed into place once its hash agrees. write_file_atomic is the whole-buffer
+// counterpart and stays what the small writers use.
+[[nodiscard]] inline std::expected<int, std::errc>
+open_new(const char* path, ::mode_t mode = 0644) noexcept {
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+    if (fd < 0)
+        return failure();
+    return fd;
+}
+
+[[nodiscard]] inline std::expected<void, std::errc> write_all(int fd, fex::bytes data) noexcept {
+    std::size_t off = 0;
+    while (off != data.size()) {
+        const auto n = ::write(fd, data.data() + off, data.size() - off);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return failure();
+        }
+        off += static_cast<std::size_t>(n);
+    }
+    return {};
+}
+
 // depth-first removal of a file or directory tree; a missing root is success
 [[nodiscard]] inline std::expected<void, std::errc> remove_tree(const std::string& path) noexcept {
     const auto st = stat_of(path.c_str());

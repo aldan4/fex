@@ -1,9 +1,9 @@
 # fex
 
 A capsule synchronization protocol over UDP. Each member owns exactly one
-**capsule** -- a local directory published to a **relay** and restored back from
-it, byte for byte. The relay stores capsules without interpreting their
-contents; there is no access to other members' capsules and no anonymous
+**capsule** -- a local directory published to a **relay** and read back from it,
+byte for byte, a file at a time. The relay stores capsules without interpreting
+their contents; there is no access to other members' capsules and no anonymous
 access.
 
 Members are identified by an x25519 key pair. A channel key is derived locally
@@ -38,7 +38,7 @@ zig build -Doptimize=ReleaseFast
 ```
 
 With `just`: `just build`, `just build-release-host`, `just test` for the unit
-and end-to-end tests, `just smoke` for a full publish/restore run against the
+and end-to-end tests, `just smoke` for a full publish/list/fetch run against the
 real binaries, and `just check` for all of it.
 
 ## Running a relay
@@ -83,28 +83,45 @@ zig-out/bin/fex generate alice --intro "family photo archive"
 ```
 
 Lay out the client root. The relay card must be named `<relay>.relay.dano`, and
-the capsule directory `<name>@<relay>` must use the same `<relay>`:
+the capsule directory `<name>@<relay>` must use the same `<relay>`; the content
+itself goes in `files/` inside it:
 
 ```sh
-mkdir -p client-root/keys client-root/self/notes@relay1
+mkdir -p client-root/keys client-root/self/notes@relay1/files
 mv alice.dano             client-root/keys/node.dano
 cp relay1.card.dano       client-root/keys/relay1.relay.dano
 ```
 
-Put whatever you want to sync into the capsule, then publish and restore:
+Put whatever you want to sync into `files/`, then publish:
 
 ```sh
-echo "hello fex" > client-root/self/notes@relay1/note.txt
+echo "hello fex" > client-root/self/notes@relay1/files/note.txt
 
 zig-out/bin/fex publish --root client-root
-zig-out/bin/fex restore --root client-root
 ```
 
-`publish` snapshots the directory, uploads what the relay is missing and
-commits; running it again with nothing changed is a no-op. `restore` makes the
-local directory match the relay, downloading what is missing, copying files
-that merely moved, and deleting what disappeared. On another machine, repeat
-the layout with the same identity and run `restore --name notes`.
+`publish` snapshots `files/`, uploads what the relay is missing and commits;
+running it again with nothing changed is a no-op. To read the capsule back --
+on this machine or on another one that holds the same identity -- ask what the
+relay holds, then fetch what you want of it:
+
+```sh
+zig-out/bin/fex inventory --root client-root --name notes
+zig-out/bin/fex fetch note.txt --root client-root --name notes
+```
+
+`inventory` prints a row per file, `<path>  <size>`. `fetch` puts one file back
+at the path the relay holds it under, checked against its hash and moved into
+place whole. Neither deletes anything, and fetching a file that is already right
+downloads nothing.
+
+Both work from `files/inventory.danl`, which every command refreshes first: the
+capsule as the relay last accepted it, one record per file with the path leading
+each line. It is a file of the capsule like any other, so `fex fetch
+inventory.danl` fetches it and `cat` reads it out with the hashes -- but it is
+the one path answered from the head rather than from a record, since an
+inventory cannot carry a record of itself. Hence the reserved name (#8): it is
+yours to read, not to write.
 
 Capsule contents are regular files with lowercase ASCII names; symlinks,
 special files and unrepresentable names abort a publication rather than being

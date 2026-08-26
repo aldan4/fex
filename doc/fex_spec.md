@@ -1,10 +1,10 @@
-# fex - capsule synchronization protocol (stage 1, revision 8, normative edition)
+# fex - capsule synchronization protocol (stage 1, revision 9, normative edition)
 
 ## 1. Model
 
 - **Member** - a node with an x25519 key pair, registered on a relay.
 - **Relay** - a node at a known address; stores capsules without interpreting their contents. The relay is trusted.
-- Each member has exactly one capsule (a local directory, published to a relay and restored back). There is no access to other members' capsules and no anonymous access. There is one channel per member, and it leads only into that member's capsule.
+- Each member has exactly one capsule (a local directory, published to a relay and read back from it file by file). There is no access to other members' capsules and no anonymous access. There is one channel per member, and it leads only into that member's capsule.
 
 ## 2. Cryptography
 
@@ -156,12 +156,12 @@ put has no reply; on the first chunk the relay creates a temporary file of file_
 danl, one record per file:
 
 ```
-{:hash "9f2c..." :path "docs/a.txt" :size 10240}
+{:path "docs/a.txt" :size 10240 :hash "9f2c..."}
 ```
 
-**Canonical form (for writing):** key order is exactly `:hash :path :size`; a single space between pairs, no comments; lowercase hex; lines sorted bytewise by `path`; every line terminated by `\n`, including the last.
+**Canonical form (for writing):** key order is exactly `:path :size :hash`; a single space between pairs, no comments; lowercase hex; lines sorted bytewise by `path`; every line terminated by `\n`, including the last.
 
-**Reading:** `hash`, `path`, `size` are required; unknown keys are ignored. The inventory is rejected as a whole on: a syntax error, a missing required key, a duplicate path, `size < 0`, invalid hex, or an invalid path (#8).
+**Reading:** `path`, `size` and `hash` are required in any order; unknown keys are ignored. The inventory is rejected as a whole on: a syntax error, a missing required key, a duplicate path, `size < 0`, invalid hex, or an invalid path (#8).
 
 **Capsule contents:** regular files only. Empty directories are not representable; a symlink or special file aborts the entire publication with an explicit error; metadata (mtime, permissions) is not preserved.
 
@@ -174,9 +174,10 @@ path:     segments joined by "/", no leading/trailing "/", no "//",
           <= 1024 bytes
 plus:     reserved windows names are forbidden (con, nul, prn, aux,
           com1-com9, lpt1-lpt9 - and with any extension)
+reserved: the path "inventory.danl" belongs to the client (#10.3)
 ```
 
-Lowercase ascii only. Non-representable names abort publication; there is no automatic renaming. One validation function used in two places: at publication and before laying files out on disk.
+Lowercase ascii only. Non-representable names and the reserved path abort publication; there is no automatic renaming. One validation function used in two places: at publication and before laying files out on disk.
 
 ## 9. The commit transaction
 
@@ -206,40 +207,64 @@ Lowercase ascii only. Non-representable names abort publication; there is no aut
 ### 10.1 Publication
 
 ```
-1. snapshot: walk the directory, compute hashes, fix the whole inventory;
-   an invalid path / special file -> abort the entire publication
+1. snapshot: walk files/, skipping inventory.danl at its root, compute
+   hashes, fix the whole inventory; an invalid path / special file ->
+   abort the entire publication
 2. peek -> head: inv_hash matches -> done
 3. for each new non-empty file: a put / poll loop until assembled
    (empty files are not uploaded); on mismatch -> abort, restart from step 1
 4. upload the inventory file the same way
 5. commit (new seq = old + 1)
+6. write the inventory as files/inventory.danl
 ```
 
 Uploads come strictly from the snapshot. n consecutive "batch of put -> poll" rounds without the missing set shrinking -> abort the upload with an explicit error.
 
-### 10.2 Restore
+### 10.2 Reading a capsule back
+
+Every command begins by bringing the inventory level with the head:
 
 ```
-1. peek -> head -> get the inventory by inv_hash
-2. validate the inventory and the paths
-3. diff against local state by hash
-4. missing files: get into a temporary file -> verify the hash ->
-   atomic rename into place
-5. delete paths that disappeared from the inventory (strictly within the
-   capsule tree)
+refresh: 1. peek -> head; seq=0 with inv_hash=zeros -> never published
+         2. if files/inventory.danl does not hash to inv_hash: get the
+            inventory by inv_hash into state/staging/, verify, rename it
+            into place (inv_size=0 -> an empty inventory.danl; inv_hash
+            must be hash(""))
+         3. validate the inventory and the paths (#7, #8)
 ```
 
-A hash match at a different path means a local copy instead of a download.
+The inventory is the one object addressed by the head rather than by a record, since an inventory cannot carry a record of itself; that is what the reserved path of #8 is for. Fetching it by name is the refresh above, reported.
+
+```
+fetch:   1-3 refresh
+         4. path = "inventory.danl" -> done, it is already in place
+         5. otherwise the path must be valid (#8) and present in the
+            inventory -> otherwise not_found
+         6. a file already at files/<path> whose hash matches -> done, no
+            download
+         7. size = 0 -> create an empty file (hash must be hash(""))
+         8. get chunks into state/staging/<hash>, hashing as they arrive ->
+            verify -> rename into files/<path> (parent directories are
+            created)
+```
+
+A client is expected to offer the inventory read out as well as fetched -- the path and size of each record, which is what a member needs in order to choose the next fetch.
+
+Nothing here deletes anything, and nothing here holds a file in memory: a download is written to its staging file as it arrives and is verified against the hash that named it before the rename puts it in place.
 
 ### 10.3 Client layout
 
 ```
 <root>/
-  self/<name>@<relay>/     -- the capsule published to this relay
-  keys/node.dano           -- identity
-  keys/profile.dano        -- profile (optional)
-  keys/<relay>.relay.dano  -- relay card
-  tmp/                     -- temporary files for restore
+  keys/node.dano                -- identity
+  keys/profile.dano             -- profile (optional)
+  keys/<relay>.relay.dano       -- relay card
+  self/<name>@<relay>/          -- the capsule published to this relay
+    files/                      -- the content, byte for byte
+    files/inventory.danl        -- the relay's inventory as last known
+                                   (#10.1 step 6, #10.2 step 2); reserved
+                                   (#8), never a record of itself
+    state/staging/<hex>         -- downloads in progress, one file per hash
 ```
 
-The #8 rules apply inside the capsule and do not extend to service names. The capsule holds content only, no service files. tmp/ is under the same root (one filesystem - atomic rename); it is cleaned at startup.
+The #8 rules apply inside files/ and do not extend to service names. files/ holds the content and, at its root, inventory.danl: the inventory the relay last published, kept for the member to read and refreshed by every command - never authored, and never a record, since an inventory cannot carry the hash of a file containing that very line. state/ holds temporaries only; it is under the same directory as files/ (one filesystem - atomic rename), and staging/ is cleaned at the start of every command.

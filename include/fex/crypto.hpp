@@ -7,6 +7,7 @@
 //   - Ascon-Hash256, Ascon-CXOF128, Ascon-AEAD128 (NIST SP 800-232) from ascon-c
 //   - X25519 key exchange and Ed25519 signatures from TweetNaCl
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -78,6 +79,125 @@ inline digest hash256(bytes msg) noexcept {
     fex_ascon_hash256(out.data(), msg.data(), msg.size());
     return out;
 }
+
+namespace detail {
+
+// The state words hold their rate bytes least significant first, which is what
+// ascon-c does on a little-endian machine and what its byte-order macros arrange
+// for on any other; spelling it out here keeps this implementation independent of
+// the host.
+[[nodiscard]] inline std::uint64_t load_le(const std::uint8_t* b, std::size_t n) noexcept {
+    std::uint64_t x = 0;
+    for (std::size_t i = 0; i != n; ++i)
+        x |= static_cast<std::uint64_t>(b[i]) << (8 * i);
+    return x;
+}
+
+inline void store_le(std::uint8_t* b, std::uint64_t w, std::size_t n) noexcept {
+    for (std::size_t i = 0; i != n; ++i)
+        b[i] = static_cast<std::uint8_t>(w >> (8 * i));
+}
+
+[[nodiscard]] inline std::uint64_t ror(std::uint64_t x, int n) noexcept {
+    return x >> n | x << (-n & 63);
+}
+
+// One round of the Ascon permutation: constant, s-box, linear layer (SP 800-232 #3).
+inline void round(std::uint64_t* x, std::uint8_t c) noexcept {
+    std::uint64_t t0, t1, t2, t3, t4;
+    x[2] ^= c;
+    x[0] ^= x[4];
+    x[4] ^= x[3];
+    x[2] ^= x[1];
+    t0 = x[0] ^ (~x[1] & x[2]);
+    t2 = x[2] ^ (~x[3] & x[4]);
+    t4 = x[4] ^ (~x[0] & x[1]);
+    t1 = x[1] ^ (~x[2] & x[3]);
+    t3 = x[3] ^ (~x[4] & x[0]);
+    t1 ^= t0;
+    t3 ^= t2;
+    t0 ^= t4;
+    x[2] = t2 ^ ror(t2, 6 - 1);
+    x[3] = t3 ^ ror(t3, 17 - 10);
+    x[4] = t4 ^ ror(t4, 41 - 7);
+    x[0] = t0 ^ ror(t0, 28 - 19);
+    x[1] = t1 ^ ror(t1, 61 - 39);
+    x[2] = t2 ^ ror(x[2], 1);
+    x[3] = t3 ^ ror(x[3], 10);
+    x[4] = t4 ^ ror(x[4], 7);
+    x[0] = t0 ^ ror(x[0], 19);
+    x[1] = t1 ^ ror(x[1], 39);
+    x[2] = ~x[2];
+}
+
+inline void permute12(std::uint64_t* x) noexcept {
+    constexpr std::uint8_t rc[12] = {0xf0, 0xe1, 0xd2, 0xc3, 0xb4, 0xa5,
+                                     0x96, 0x87, 0x78, 0x69, 0x5a, 0x4b};
+    for (const auto c : rc) round(x, c);
+}
+
+} // namespace detail
+
+// Ascon-Hash256 taken a piece at a time.
+//
+// ascon-c pads at the end of its absorb, so its one-shot entry point cannot be
+// resumed: hashing a file through it means holding the whole file. This is the
+// same sponge with its state kept between calls -- the initial words are the
+// standard IV already permuted, as the reference stores them -- so a hash costs
+// one buffer of whatever the caller reads at a time and nothing more.
+class hash256_stream {
+public:
+    void update(bytes msg) noexcept {
+        const auto* in = msg.data();
+        auto left = msg.size();
+        if (used_ != 0) {
+            const auto take = std::min(rate - used_, left);
+            for (std::size_t i = 0; i != take; ++i) block_[used_ + i] = in[i];
+            used_ += take;
+            in += take;
+            left -= take;
+            if (used_ != rate) return;
+            absorb_block(block_);
+            used_ = 0;
+        }
+        while (left >= rate) {
+            absorb_block(in);
+            in += rate;
+            left -= rate;
+        }
+        for (std::size_t i = 0; i != left; ++i) block_[i] = in[i];
+        used_ = left;
+    }
+
+    // Pads the tail, squeezes the digest, and leaves the state spent: one call
+    // per hash, as the reference's absorb-then-squeeze pair allows.
+    [[nodiscard]] digest final() noexcept {
+        x_[0] ^= detail::load_le(block_, used_);
+        x_[0] ^= 0x01ull << (8 * used_);
+        used_ = 0;
+        digest out;
+        detail::permute12(x_);
+        for (std::size_t at = 0; at != hash_bytes; at += rate) {
+            detail::store_le(out.data() + at, x_[0], rate);
+            if (at + rate != hash_bytes) detail::permute12(x_);
+        }
+        return out;
+    }
+
+private:
+    static constexpr std::size_t rate = 8;
+
+    void absorb_block(const std::uint8_t* b) noexcept {
+        x_[0] ^= detail::load_le(b, rate);
+        detail::permute12(x_);
+    }
+
+    std::uint64_t x_[5] = {0x9b1e5494e934d681ull, 0x4bc3a01e333751d2ull,
+                           0xae65396c6b34b81aull, 0x3c7fd4a4d56a4db3ull,
+                           0x1a5c464906c5976dull};
+    std::uint8_t block_[rate]{};
+    std::size_t used_ = 0;
+}; // hash256_stream
 
 // Customized XOF: fills `out` entirely. `custom` is the customization string (<= 256 bytes).
 inline void cxof128(std::span<std::uint8_t> out, bytes msg, bytes custom) noexcept {
@@ -249,6 +369,27 @@ TEST_CASE("ascon-hash256 matches LWC_HASH_KAT_128_256") {
     for (const auto& v : vectors) {
         const auto msg = detail::unhex(v.msg);
         REQUIRE_EQ(ascon::hash256(msg), detail::unhex_array<32>(v.md));
+    }
+}
+
+TEST_CASE("ascon-hash256 streamed in pieces equals the one-shot hash") {
+    using namespace fex;
+    using namespace fex::crypto;
+    // A message longer than the 8-byte rate by an amount that is not a multiple of
+    // it, so every split lands mid-block at least once.
+    std::vector<std::uint8_t> msg(1000 + 7);
+    for (std::size_t i = 0; i != msg.size(); ++i)
+        msg[i] = static_cast<std::uint8_t>((i * 131 + 7) & 0xff);
+
+    for (const std::size_t piece : {std::size_t{1}, std::size_t{7}, std::size_t{8},
+                                    std::size_t{1000}}) {
+        for (const std::size_t len : {std::size_t{0}, std::size_t{1}, std::size_t{8},
+                                      std::size_t{9}, msg.size()}) {
+            ascon::hash256_stream h;
+            for (std::size_t at = 0; at < len; at += piece)
+                h.update(fex::bytes{msg.data() + at, std::min(piece, len - at)});
+            REQUIRE_EQ(h.final(), ascon::hash256(fex::bytes{msg.data(), len}));
+        }
     }
 }
 

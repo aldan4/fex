@@ -22,14 +22,14 @@ inline int run(const flags::args& args) {
     auto cfg = configure(args);
     if (!cfg)
         return cfg.error();
-    if (const auto made = fs::ensure_dirs(cfg->capsule_dir); !made)
-        return fail("cannot create {}: {}", cfg->capsule_dir, message(made.error()));
+    if (const auto made = fs::ensure_dirs(cfg->files_dir); !made)
+        return fail("cannot create {}: {}", cfg->files_dir, message(made.error()));
     auto req = client::requester::connect(cfg->self, cfg->relay);
     if (!req)
         return fail("cannot reach relay '{}' at {}: {}", cfg->relay_name,
                     cfg->relay.addr, message(req.error()));
     std::string offending;
-    const auto report = fex::client::publish(*req, cfg->capsule_dir, &offending);
+    const auto report = fex::client::publish(*req, cfg->files_dir, &offending);
     if (!report) {
         if (!offending.empty())
             return fail("publication refused by '{}': {}", offending,
@@ -37,9 +37,9 @@ inline int run(const flags::args& args) {
         return fail("publish failed: {}", message(report.error()));
     }
     if (report->unchanged)
-        std::println("{} is already published as seq {}", cfg->capsule_dir, report->seq);
+        std::println("{} is already published as seq {}", cfg->files_dir, report->seq);
     else
-        std::println("published {} to {} as seq {}", cfg->capsule_dir,
+        std::println("published {} to {} as seq {}", cfg->files_dir,
                      cfg->relay_name, report->seq);
     return exit_ok;
 }
