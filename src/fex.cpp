@@ -7,6 +7,7 @@
 #include <fex/commands/generate.hpp>
 #include <fex/commands/inventory.hpp>
 #include <fex/commands/publish.hpp>
+#include <fex/commands/roster.hpp>
 
 #include <flags.h>
 
@@ -26,11 +27,13 @@ std::string usage() {
     text += publish::synopsis;
     text += inventory::synopsis;
     text += fetch::synopsis;
+    text += roster::synopsis;
     text += "  fex help | version\n\ncommands:\n";
     text += generate::summary;
     text += publish::summary;
     text += inventory::summary;
     text += fetch::summary;
+    text += roster::summary;
     text += "  help                    this text\n"
             "  version                 print the version\n";
     text += "\noptions:\n";
@@ -62,6 +65,7 @@ int main(int argc, char** argv) {
     if (command == publish::name) return publish::run(args);
     if (command == inventory::name) return inventory::run(args);
     if (command == fetch::name) return fetch::run(args);
+    if (command == roster::name) return roster::run(args);
 
     fail("unknown command '{}'", command);
     std::print(stderr, "{}", usage());

@@ -90,9 +90,12 @@ smoke: build-release-host
     {{client_bin}} generate alice  --dir "$demo/keys" --intro "smoke member" >/dev/null
 
     echo "==> relay root, two client roots"
-    mkdir -p "$demo/relay/members" "$demo/alice/keys" "$capsule/docs" "$demo/alice2/keys"
+    mkdir -p "$demo/relay" "$demo/alice/keys" "$capsule/docs" "$demo/alice2/keys"
     cp "$demo/keys/relay1.dano"       "$demo/relay/node.dano"
-    cp "$demo/keys/alice.card.dano"   "$demo/relay/members/alice.dano"
+    # registration (#3): a line in roster.danl, which is the registry and the
+    # directory the relay publishes at once (#6)
+    pub=$(sed -n 's/.*:pub "\([0-9a-f]*\)".*/\1/p' "$demo/keys/alice.card.dano")
+    printf '{:kind "member" :name "alice" :pub "%s"}\n' "$pub" > "$demo/relay/roster.danl"
     for root in alice alice2; do
         cp "$demo/keys/alice.dano"       "$demo/$root/keys/node.dano"
         cp "$demo/keys/relay1.card.dano" "$demo/$root/keys/relay1.relay.dano"
@@ -164,9 +167,24 @@ smoke: build-release-host
     test -z "$(ls "$demo/alice2/self/notes@relay1/state/staging")"
     echo "    what was asked for arrived, and nothing else moved"
 
-    echo "==> relay state"
+    echo "==> the relay's directory (#6): list says where it stands, get brings it"
+    {{client_bin}} roster --root "$demo/alice" --name notes | tee "$demo/roster" | sed "s/^/    /"
+    grep -q "member  alice" "$demo/roster"
+    test -f "$demo/alice/peers/relay1/roster.danl"      # #10.3: under the relay it came from
+    ! grep -q ':addr' "$demo/alice/peers/relay1/roster.danl"   # identity only
+    # asking again is a list and a local hash, not a transfer
+    {{client_bin}} roster --root "$demo/alice" --name notes | grep -q "already up to date"
+
+    echo "==> relay state: a head, and the objects it leads to (#6)"
     sed "s/^/    /" "$demo/relay/capsules/alice/head.dano"
-    sed "s/^/    /" "$demo/relay/capsules/alice/inventory.danl"
+    echo "    objects: $(ls "$demo/relay/objects" | wc -l | tr -d ' ')"
+    # the head names the inventory, and the inventory is an object like the rest
+    inv=$(sed -n 's/.*:hash "\([0-9a-f]*\)".*/\1/p' "$demo/relay/capsules/alice/head.dano")
+    test -f "$demo/relay/objects/$inv"
+    sed "s/^/    /" "$demo/relay/objects/$inv"
+    # nothing is laid out by path any more
+    test ! -e "$demo/relay/capsules/alice/tree"
+    test ! -e "$demo/relay/capsules/alice/inventory.danl"
 
     rm -rf "$demo"
     echo "==> smoke ok"

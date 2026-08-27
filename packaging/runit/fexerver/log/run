@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Andrei Ilin <ortfero@gmail.com>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+mkdir -p /var/log/fexerver
+chown _log:_log /var/log/fexerver
+chmod 0750 /var/log/fexerver
+exec chpst -u _log:_log svlogd -tt /var/log/fexerver

@@ -25,15 +25,16 @@ inline constexpr u8 protocol_version = 1;
 
 // #4 outer layer
 inline constexpr std::size_t datagram_max = 1232;
-inline constexpr std::size_t pheader_size = 24;
-inline constexpr std::size_t nonce_size = 14;
+inline constexpr std::size_t pheader_size = 32;
+inline constexpr std::size_t nonce_size = 15;
 inline constexpr std::size_t aead_tag_size = crypto::ascon::tag_bytes;
-inline constexpr std::size_t ballast_size = 72;
-inline constexpr std::size_t peek_size = pheader_size + ballast_size;
+// a datagram carrying nothing at all: the routing prefix and a bare tag
+inline constexpr std::size_t min_datagram = pheader_size + aead_tag_size;
 inline constexpr std::size_t max_command = datagram_max - pheader_size - aead_tag_size;
 
 // #5 inner layer
 inline constexpr std::size_t mprefix_size = 8;
+inline constexpr std::size_t peek_size = 24;
 inline constexpr std::size_t head_size = 56;
 inline constexpr std::size_t put_base = 56;
 inline constexpr std::size_t get_size = 48;
@@ -42,31 +43,31 @@ inline constexpr std::size_t poll_size = 40;
 inline constexpr std::size_t gaps_base = 16;
 inline constexpr std::size_t commit_size = 48;
 inline constexpr std::size_t done_size = 8;
+inline constexpr std::size_t list_size = 8;
+inline constexpr std::size_t roster_size = 48;
 
 // #5.1 chunks
 inline constexpr u64 chunk_data_size = 1024;
 
 inline constexpr std::size_t gaps_max_count = (max_command - gaps_base) / 8;
 
-static_assert(max_command == 1192);
-static_assert(gaps_max_count == 147);
-static_assert(peek_size == 96);
+static_assert(max_command == 1184);
+static_assert(gaps_max_count == 146);
+static_assert(min_datagram == 48);
 
-enum struct pkind : u8 {
-  peek = 0x01, request = 0x02, response = 0x81
-}; // pkind
-
+// #4: one packet format, no outer kinds. `id` is the immediate sender; `peer`
+// is the other end of the route (0 = the packet is for the receiver itself).
 struct pheader {
   u8 version;
-  pkind kind;
   u8 nonce[nonce_size];
   u64 id;
+  u64 peer;
 }; // pheader
 static_assert(sizeof(pheader) == pheader_size);
 
 enum struct mkind : u8 {
-  put = 0x01, get = 0x02, poll = 0x03, commit = 0x04,
-  head = 0x80, chunk = 0x82, gaps = 0x83, done = 0x84
+  put = 0x01, get = 0x02, poll = 0x03, commit = 0x04, list = 0x05, peek = 0x06,
+  head = 0x80, chunk = 0x82, gaps = 0x83, done = 0x84, roster = 0x85
 }; // mkind
 
 enum struct mstatus : u8 {
@@ -75,11 +76,13 @@ enum struct mstatus : u8 {
 }; // mstatus
 
 inline constexpr bool is_request_kind(mkind k) noexcept {
-  return k == mkind::put || k == mkind::get || k == mkind::poll || k == mkind::commit;
+  return k == mkind::put || k == mkind::get || k == mkind::poll
+      || k == mkind::commit || k == mkind::list || k == mkind::peek;
 }
 
 inline constexpr bool is_response_kind(mkind k) noexcept {
-  return k == mkind::head || k == mkind::chunk || k == mkind::gaps || k == mkind::done;
+  return k == mkind::head || k == mkind::chunk || k == mkind::gaps
+      || k == mkind::done || k == mkind::roster;
 }
 
 // in-memory prefix; on the wire it is kind:u8@0 || status:u8@1 || req_id:b6@2
@@ -141,13 +144,14 @@ inline constexpr void store_u32(u8* p, u32 v) noexcept {
 
 inline void write_pheader(std::span<u8> out, const pheader& h) noexcept {
   out[0] = h.version;
-  out[1] = static_cast<u8>(h.kind);
-  std::copy(h.nonce, h.nonce + nonce_size, out.data() + 2);
+  std::copy(h.nonce, h.nonce + nonce_size, out.data() + 1);
   store_u64(out.data() + 16, h.id);
+  store_u64(out.data() + 24, h.peer);
 }
 
-// nullopt = silent drop: short datagram or version mismatch; kind is not
-// checked here -- each side drops the halves it does not accept itself
+// nullopt = silent drop: short datagram or version mismatch. Whether a packet is
+// a request or a reply is the high bit of the inner kind (#4), so there is
+// nothing out here for either side to accept or refuse beyond the version.
 inline std::optional<pheader> read_pheader(bytes datagram) noexcept {
   if (datagram.size() < pheader_size)
     return std::nullopt;
@@ -155,9 +159,9 @@ inline std::optional<pheader> read_pheader(bytes datagram) noexcept {
     return std::nullopt;
   pheader h;
   h.version = datagram[0];
-  h.kind = static_cast<pkind>(datagram[1]);
-  std::copy(datagram.data() + 2, datagram.data() + 2 + nonce_size, h.nonce);
+  std::copy(datagram.data() + 1, datagram.data() + 1 + nonce_size, h.nonce);
   h.id = load_u64(datagram.data() + 16);
+  h.peer = load_u64(datagram.data() + 24);
   return h;
 }
 
@@ -181,6 +185,14 @@ inline std::optional<mheader> read_mheader(bytes plain) noexcept {
 }
 
 // messages
+
+// #5: `time` is the sender's creation timestamp in seconds since the unix
+// epoch, meaningful only in a direct peek (#4); `target` is the member whose
+// capsule is asked about, always explicit -- one's own included.
+struct peek {
+  u64 time;
+  u64 target;
+}; // peek
 
 struct head {
   u64 seq;
@@ -225,6 +237,15 @@ struct commit {
 
 struct done {}; // done
 
+struct list {}; // list
+
+// #5, #6: where the serving relay's roster stands. The file itself is an
+// object like any other and is fetched by get.
+struct roster {
+  u64 size;
+  u8 hash[32];
+}; // roster
+
 // z = min(1024, file_size - chunk_no*1024); nullopt when file_size is zero
 // (#5.1: invalid) or chunk_no is past the end of the file
 inline constexpr std::optional<u64> chunk_len(u64 file_size, u64 chunk_no) noexcept {
@@ -241,6 +262,15 @@ inline constexpr u64 chunk_count(u64 file_size) noexcept {
 }
 
 // encoders: write prefix + payload, return bytes written, 0 if out is too small
+
+inline std::size_t write_peek(std::span<u8> out, mheader h, const peek& m) noexcept {
+  if (out.size() < peek_size)
+    return 0;
+  write_mprefix(out, h);
+  store_u64(out.data() + 8, m.time);
+  store_u64(out.data() + 16, m.target);
+  return peek_size;
+}
 
 inline std::size_t write_head(std::span<u8> out, mheader h, const head& m) noexcept {
   if (out.size() < head_size)
@@ -321,8 +351,33 @@ inline std::size_t write_done(std::span<u8> out, mheader h) noexcept {
   return done_size;
 }
 
+inline std::size_t write_list(std::span<u8> out, mheader h) noexcept {
+  if (out.size() < list_size)
+    return 0;
+  write_mprefix(out, h);
+  return list_size;
+}
+
+inline std::size_t write_roster(std::span<u8> out, mheader h, const roster& m) noexcept {
+  if (out.size() < roster_size)
+    return 0;
+  write_mprefix(out, h);
+  store_u64(out.data() + 8, m.size);
+  std::copy(m.hash, m.hash + 32, out.data() + 16);
+  return roster_size;
+}
+
 // decoders: exact length validation per #5, nullopt = silent drop;
 // the caller has already read the prefix and dispatched on its kind
+
+inline std::optional<peek> read_peek(bytes plain) noexcept {
+  if (plain.size() != peek_size)
+    return std::nullopt;
+  peek m;
+  m.time = load_u64(plain.data() + 8);
+  m.target = load_u64(plain.data() + 16);
+  return m;
+}
 
 inline std::optional<head> read_head(bytes plain) noexcept {
   if (plain.size() != head_size)
@@ -404,6 +459,21 @@ inline std::optional<done> read_done(bytes plain) noexcept {
   return done{};
 }
 
+inline std::optional<list> read_list(bytes plain) noexcept {
+  if (plain.size() != list_size)
+    return std::nullopt;
+  return list{};
+}
+
+inline std::optional<roster> read_roster(bytes plain) noexcept {
+  if (plain.size() != roster_size)
+    return std::nullopt;
+  roster m;
+  m.size = load_u64(plain.data() + 8);
+  std::copy(plain.data() + 16, plain.data() + 48, m.hash);
+  return m;
+}
+
 } // namespace fex::wire
 
 #ifdef FEX_WITH_TESTS
@@ -443,25 +513,48 @@ SCENARIO("pheader roundtrip and drops") {
     using namespace fex::wire;
     pheader h{};
     h.version = protocol_version;
-    h.kind = pkind::request;
     for (unsigned i = 0; i != nonce_size; ++i)
         h.nonce[i] = static_cast<u8>(i + 1);
     h.id = 0x0123'4567'89ab'cdefull;
+    h.peer = 0xfedc'ba98'7654'3210ull;
     u8 buf[pheader_size];
     write_pheader(buf, h);
     CHECK(buf[0] == 1);
-    CHECK(buf[1] == 0x02);
-    CHECK(buf[16] == 0xef);
+    CHECK(buf[1] == 0x01);  // the nonce starts where the kind used to be
+    CHECK(buf[15] == nonce_size);
+    CHECK(buf[16] == 0xef); // id:u64@16, little-endian
+    CHECK(buf[24] == 0x10); // peer:u64@24
     const auto back = read_pheader(bytes{buf});
     REQUIRE(back.has_value());
     CHECK(back->id == h.id);
-    CHECK(back->kind == h.kind);
+    CHECK(back->peer == h.peer);
     CHECK(std::equal(back->nonce, back->nonce + nonce_size, h.nonce));
     // version mismatch and short datagram -> drop
     buf[0] = 2;
     CHECK(!read_pheader(bytes{buf}).has_value());
     buf[0] = 1;
     CHECK(!read_pheader(bytes{buf, pheader_size - 1}).has_value());
+}
+
+SCENARIO("peek roundtrip") {
+    using namespace fex;
+    using namespace fex::wire;
+    peek m{};
+    m.time = 1'700'000'000ull;
+    m.target = 0x0123'4567'89ab'cdefull;
+    u8 buf[peek_size];
+    const auto h = mheader_of(mkind::peek, mstatus::ok, 0x123456);
+    REQUIRE(write_peek(buf, h, m) == peek_size);
+    CHECK(buf[0] == 0x06);
+    const auto back = read_peek(bytes{buf});
+    REQUIRE(back.has_value());
+    CHECK(back->time == m.time);
+    CHECK(back->target == m.target);
+    // a peek is exactly 24 bytes and no other length
+    CHECK(!read_peek(bytes{buf, peek_size - 1}).has_value());
+    std::array<u8, peek_size + 1> longer{};
+    std::copy(buf, buf + peek_size, longer.begin());
+    CHECK(!read_peek(bytes{longer}).has_value());
 }
 
 SCENARIO("chunk_len") {
@@ -568,6 +661,25 @@ SCENARIO("get/poll/commit/done roundtrip") {
     REQUIRE(write_done(buf, mheader_of(mkind::done, mstatus::ok, 4)) == done_size);
     CHECK(read_done(bytes{buf, done_size}).has_value());
     CHECK(!read_done(bytes{buf, done_size + 1}).has_value());
+
+    // list carries nothing but its prefix; roster answers with a pointer
+    REQUIRE(write_list(buf, mheader_of(mkind::list, mstatus::ok, 5)) == list_size);
+    CHECK(buf[0] == 0x05);
+    CHECK(read_list(bytes{buf, list_size}).has_value());
+    CHECK(!read_list(bytes{buf, list_size + 1}).has_value());
+
+    roster r{};
+    r.size = 4096;
+    for (unsigned i = 0; i != 32; ++i)
+        r.hash[i] = static_cast<u8>(i * 11);
+    REQUIRE(write_roster(buf, mheader_of(mkind::roster, mstatus::ok, 6), r)
+            == roster_size);
+    CHECK(buf[0] == 0x85);
+    auto rb = read_roster(bytes{buf, roster_size});
+    REQUIRE(rb.has_value());
+    CHECK(rb->size == 4096);
+    CHECK(std::equal(rb->hash, rb->hash + 32, r.hash));
+    CHECK(!read_roster(bytes{buf, roster_size - 1}).has_value());
 }
 
 SCENARIO("chunk roundtrip and rejects") {
@@ -607,8 +719,8 @@ SCENARIO("gaps roundtrip and boundary") {
     auto back = read_gaps(bytes{buf.data(), n});
     REQUIRE(back.has_value());
     CHECK(back->count == gaps_max_count);
-    CHECK(back->ranges[146].from == 292);
-    CHECK(back->ranges[146].to == 293);
+    CHECK(back->ranges[gaps_max_count - 1].from == 290);
+    CHECK(back->ranges[gaps_max_count - 1].to == 291);
     // count 148 -> reject
     store_u64(buf.data() + 8, gaps_max_count + 1);
     CHECK(!read_gaps(bytes{buf.data(), gaps_base + 8 * (gaps_max_count + 1)}).has_value());
@@ -625,11 +737,17 @@ SCENARIO("kind halves") {
     using namespace fex::wire;
     static_assert(is_request_kind(mkind::put));
     static_assert(is_request_kind(mkind::commit));
+    static_assert(is_request_kind(mkind::peek));
+    static_assert(is_request_kind(mkind::list));
     static_assert(!is_request_kind(mkind::head));
     static_assert(is_response_kind(mkind::gaps));
+    static_assert(is_response_kind(mkind::roster));
     static_assert(!is_response_kind(mkind::poll));
-    static_assert(!is_request_kind(static_cast<mkind>(0x05)));
+    static_assert(!is_response_kind(mkind::peek));
+    static_assert(!is_request_kind(mkind::roster));
+    // 0x81 was an outer kind two revisions ago and is nothing now
     static_assert(!is_response_kind(static_cast<mkind>(0x81)));
+    static_assert(!is_request_kind(static_cast<mkind>(0x07)));
 }
 
 }

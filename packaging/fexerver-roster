@@ -1,0 +1,99 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Andrei Ilin <ortfero@gmail.com>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# fexerver-roster -- register members on a relay.
+#
+# roster.danl is the relay's registry and its published directory at once, so
+# registration is one line in one file. The relay rereads it within a second;
+# no restart, no reload signal. A malformed roster is refused whole and the
+# relay silently keeps serving the last good one, so this writes it atomically
+# and checks what it is about to add.
+
+set -eu
+
+root=/var/lib/fexerver
+
+usage() {
+	cat <<'USAGE'
+usage:
+  fexerver-roster [--root <path>] add <name> <card.dano>
+  fexerver-roster [--root <path>] remove <name>
+  fexerver-roster [--root <path>] list
+
+  <name> is what the member is called on this relay and the directory their
+  capsule gets: [a-z0-9._-], no leading "-", 255 bytes at most.
+  <card.dano> is the member's card, the file `fex generate` prints alongside
+  their identity. It carries the public key and nothing secret.
+USAGE
+}
+
+die() { echo "fexerver-roster: $*" >&2; exit 1; }
+
+while [ $# -gt 0 ]; do
+	case $1 in
+		--root) [ $# -ge 2 ] || die "--root needs a path"; root=$2; shift 2 ;;
+		--root=*) root=${1#--root=}; shift ;;
+		-h|--help) usage; exit 0 ;;
+		*) break ;;
+	esac
+done
+
+[ $# -ge 1 ] || { usage >&2; exit 1; }
+verb=$1; shift
+roster=$root/roster.danl
+
+valid_name() {
+	case $1 in
+		''|-*) return 1 ;;
+		*[!a-z0-9._-]*) return 1 ;;
+		*[!.]*) : ;;
+		*) return 1 ;;             # dots alone: "." and ".."
+	esac
+	[ "${#1}" -le 255 ]
+}
+
+# write stdin over $roster without ever leaving it half-written
+replace_roster() {
+	tmp=$roster.tmp.$$
+	cat > "$tmp"
+	chmod 0644 "$tmp"
+	if owner=$(stat -c '%u:%g' "$root" 2>/dev/null); then
+		chown "$owner" "$tmp" 2>/dev/null || :
+	fi
+	mv -f "$tmp" "$roster"
+}
+
+case $verb in
+	add)
+		[ $# -eq 2 ] || { usage >&2; exit 1; }
+		name=$1; card=$2
+		valid_name "$name" || die "'$name' is not a usable member name"
+		[ -f "$card" ] || die "no such card: $card"
+		[ -d "$root" ] || die "no such relay root: $root"
+		pub=$(sed -n 's/.*:pub "\([0-9a-f]\{64\}\)".*/\1/p' "$card" | head -n 1)
+		[ -n "$pub" ] || die "no :pub in $card -- is it a card and not an identity?"
+		if [ -f "$roster" ]; then
+			grep -q ":name \"$name\"" "$roster" && die "'$name' is already registered"
+			grep -q ":pub \"$pub\"" "$roster" && die "that key is already registered under another name"
+		fi
+		{ [ -f "$roster" ] && cat "$roster"
+		  printf '{:kind "member" :name "%s" :pub "%s"}\n' "$name" "$pub"
+		} | replace_roster
+		echo "registered $name"
+		;;
+	remove)
+		[ $# -eq 1 ] || { usage >&2; exit 1; }
+		name=$1
+		[ -f "$roster" ] || die "no roster at $roster"
+		grep -q ":name \"$name\"" "$roster" || die "'$name' is not registered"
+		grep -v ":name \"$name\"" "$roster" | replace_roster
+		echo "removed $name -- capsules/$name is left on disk, remove it by hand if you mean to"
+		;;
+	list)
+		[ -f "$roster" ] || { echo "nobody is registered on $root"; exit 0; }
+		sed -n 's/{:kind "\([a-z]*\)" :name "\([^"]*\)" :pub "\([0-9a-f]*\)".*/\1\t\2\t\3/p' "$roster"
+		;;
+	*)
+		usage >&2; exit 1 ;;
+esac

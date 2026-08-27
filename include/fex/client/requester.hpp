@@ -6,6 +6,8 @@
 // Client request engine: one connected UDP socket, blocking waits with a
 // deadline. No answer within the timeout -> peek, await head, resend the same
 // request (same req_id, so a late original still matches; the nonce is fresh).
+// A reply names the relay as its sender and peer = 0 (#4), so that is what an
+// accepted datagram has to say before its tag is even checked.
 
 #include <cstdint>
 #include <expected>
@@ -85,6 +87,7 @@ class requester {
     net::udp_socket sock_;
     channel::key k_{};
     u64 id_ = 0;
+    u64 relay_id_ = 0;
     net_options opts_{};
 
 public:
@@ -106,6 +109,7 @@ public:
         requester r;
         r.opts_ = opts;
         r.id_ = fingerprint(self.pub);
+        r.relay_id_ = fingerprint(relay.pub);
         if (!channel::derive(r.k_, self.priv, relay.pub))
             return std::unexpected(std::errc::bad_message);
         auto sock = net::udp_socket::open(ep->af());
@@ -118,22 +122,34 @@ public:
         return r;
     }
 
-    // #4 peek -> head; also re-confirms our address after silence
+    // #4, #5 peek -> head: where the capsule stands and, on this leg, what
+    // confirms our address. `target` is explicit even for our own capsule, and
+    // `time` is what the relay judges against its window -- so it is taken
+    // afresh on every attempt, not once for the whole retry loop.
     [[nodiscard]] std::expected<wire::head, std::errc> peek() noexcept {
-        std::array<u8, wire::peek_size> pk;
+        std::array<u8, wire::peek_size> cmd;
         std::array<u8, wire::max_command> plain;
+        const auto req_id = fresh_req_id();
         for (int attempt = 0; attempt != opts_.peek_attempts; ++attempt) {
-            if (channel::make_peek(pk, id_) != wire::peek_size)
+            wire::peek p{};
+            p.time = fs::now_ns() / 1'000'000'000ull;
+            p.target = id_;
+            const auto n = wire::write_peek(
+                cmd, wire::mheader_of(wire::mkind::peek, wire::mstatus::ok, req_id), p);
+            if (n != wire::peek_size)
                 return std::unexpected(std::errc::invalid_argument);
-            if (auto s = sock_.send(fex::bytes{pk}); !s)
+            if (auto s = send_request(fex::bytes{cmd.data(), n}); !s)
                 return std::unexpected(s.error());
-            const auto n = await(0, plain, opts_.peek_timeout_ms);
-            if (!n)
+            const auto got = await(req_id, plain, opts_.peek_timeout_ms);
+            if (!got)
                 continue;
-            const auto mh = wire::read_mheader(fex::bytes{plain.data(), *n});
+            const auto mh = wire::read_mheader(fex::bytes{plain.data(), *got});
             if (!mh || wire::mkind_of(*mh) != wire::mkind::head)
                 continue;
-            const auto head = wire::read_head(fex::bytes{plain.data(), *n});
+            // the relay holds no such capsule: an answer, not a lost packet
+            if (wire::mstatus_of(*mh) != wire::mstatus::ok)
+                return std::unexpected(std::errc::no_such_file_or_directory);
+            const auto head = wire::read_head(fex::bytes{plain.data(), *got});
             if (head)
                 return *head;
         }
@@ -172,7 +188,7 @@ private:
 
     [[nodiscard]] std::expected<void, std::errc> send_request(fex::bytes cmd) noexcept {
         std::array<u8, wire::datagram_max> dgram;
-        const auto n = channel::seal(dgram, wire::pkind::request, id_, cmd, k_);
+        const auto n = channel::seal(dgram, id_, 0, cmd, k_);
         if (n == 0)
             return std::unexpected(std::errc::invalid_argument);
         if (auto s = sock_.send(fex::bytes{dgram.data(), n}); !s)
@@ -202,7 +218,7 @@ private:
                 continue;
             const fex::bytes dgram{in.data(), *got};
             const auto h = wire::read_pheader(dgram);
-            if (!h || h->kind != wire::pkind::response || h->id != id_)
+            if (!h || h->id != relay_id_ || h->peer != 0)
                 continue;
             const auto n = channel::open(plain, dgram, k_);
             if (!n)

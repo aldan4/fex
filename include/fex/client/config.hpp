@@ -42,6 +42,7 @@ struct config {
     std::string capsule_name;
     std::string files_dir; // <root>/self/<name>@<relay>/files
     std::string state_dir; // <root>/self/<name>@<relay>/state
+    std::string peers_dir; // <root>/peers
 }; // config
 
 // Where a download is written before it is renamed into place, and where the
@@ -53,6 +54,21 @@ struct config {
 
 [[nodiscard]] inline std::string inventory_path(std::string_view files_dir) {
     return std::string{files_dir} + '/' + std::string{inventory_name};
+}
+
+// #10.3: everything read from a relay lives under the name that relay is known
+// by -- one's own and, when federation arrives, the federated ones, uniformly.
+[[nodiscard]] inline std::string peer_dir(std::string_view peers_dir,
+                                          std::string_view relay_name) {
+    return std::string{peers_dir} + '/' + std::string{relay_name};
+}
+
+[[nodiscard]] inline std::string peer_state_dir(std::string_view peer_dir) {
+    return std::string{peer_dir} + "/state";
+}
+
+[[nodiscard]] inline std::string roster_path(std::string_view peer_dir) {
+    return std::string{peer_dir} + '/' + std::string{roster_name};
 }
 
 namespace detail {
@@ -125,6 +141,7 @@ load_config(std::string_view root_flag, std::string_view relay_flag,
     const auto capsule = cfg.root + "/self/" + cfg.capsule_name + '@' + cfg.relay_name;
     cfg.files_dir = capsule + "/files";
     cfg.state_dir = capsule + "/state";
+    cfg.peers_dir = cfg.root + "/peers";
     return cfg;
 }
 
@@ -160,6 +177,10 @@ SCENARIO("config discovery") {
     CHECK(cfg->capsule_name == "mine");
     CHECK(cfg->files_dir == root + "/self/mine@hub/files");
     CHECK(cfg->state_dir == root + "/self/mine@hub/state");
+    CHECK(cfg->peers_dir == root + "/peers");
+    CHECK(client::peer_dir(cfg->peers_dir, cfg->relay_name) == root + "/peers/hub");
+    CHECK(client::roster_path(client::peer_dir(cfg->peers_dir, cfg->relay_name))
+          == root + "/peers/hub/roster.danl");
     CHECK(client::staging_dir(cfg->state_dir) == root + "/self/mine@hub/state/staging");
     CHECK(client::inventory_path(cfg->files_dir)
           == root + "/self/mine@hub/files/inventory.danl");

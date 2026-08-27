@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Andrei Ilin <ortfero@gmail.com>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# /etc/conf.d/fexerver -- settings for the fex capsule relay.
+
+# Relay root: node.dano, roster.danl, objects/ and capsules/ live here.
+#FEXERVER_ROOT="/var/lib/fexerver"
+
+# Address to listen on. UDP. Use "[::]:4444" for IPv6 (dual-stack unless the
+# kernel is set to bindv6only).
+#FEXERVER_ADDR="0.0.0.0:4444"
+
+# How far a direct peek's timestamp may stand from this clock, in seconds, and
+# how long its nonce is remembered against replay.
+#FEXERVER_WINDOW="120"
+
+#FEXERVER_USER="fexerver"
+#FEXERVER_GROUP="fexerver"
+#FEXERVER_LOG="/var/log/fexerver.log"

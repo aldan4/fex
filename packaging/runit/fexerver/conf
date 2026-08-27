@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Andrei Ilin <ortfero@gmail.com>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# /etc/sv/fexerver/conf -- sourced by run.
+
+# Relay root: node.dano, roster.danl, objects/ and capsules/ live here.
+#FEXERVER_ROOT="/var/lib/fexerver"
+
+# Address to listen on. UDP. Use "[::]:4444" for IPv6.
+#FEXERVER_ADDR="0.0.0.0:4444"
+
+# Direct-peek window, in seconds: clock tolerance and replay memory.
+#FEXERVER_WINDOW="120"
+
+#FEXERVER_USER="fexerver"
+#FEXERVER_GROUP="fexerver"

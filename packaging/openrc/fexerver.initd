@@ -1,0 +1,44 @@
+#!/sbin/openrc-run
+# SPDX-FileCopyrightText: 2026 Andrei Ilin <ortfero@gmail.com>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# fexerver stays in the foreground, so it is supervised rather than backgrounded.
+# Settings live in /etc/conf.d/fexerver.
+
+: ${FEXERVER_ROOT:=/var/lib/fexerver}
+: ${FEXERVER_ADDR:=0.0.0.0:4444}
+: ${FEXERVER_WINDOW:=120}
+: ${FEXERVER_USER:=fexerver}
+: ${FEXERVER_GROUP:=fexerver}
+: ${FEXERVER_LOG:=/var/log/fexerver.log}
+
+description="fex capsule relay"
+
+command="/usr/bin/fexerver"
+command_args="--root ${FEXERVER_ROOT} --addr ${FEXERVER_ADDR} --window ${FEXERVER_WINDOW}"
+command_user="${FEXERVER_USER}:${FEXERVER_GROUP}"
+supervisor="supervise-daemon"
+pidfile="/run/fexerver.pid"
+respawn_delay=2
+# bounded on purpose: a relay that cannot read its roster or its identity exits
+# at once, and five of those in a minute is a configuration error to be reported
+# as a failed service, not restarted forever
+respawn_max=5
+respawn_period=60
+output_log="${FEXERVER_LOG}"
+error_log="${FEXERVER_LOG}"
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	checkpath -d -m 0750 -o "${FEXERVER_USER}:${FEXERVER_GROUP}" "${FEXERVER_ROOT}" || return 1
+	checkpath -f -m 0640 -o "${FEXERVER_USER}:${FEXERVER_GROUP}" "${FEXERVER_LOG}" || return 1
+	if [ ! -f "${FEXERVER_ROOT}/node.dano" ]; then
+		eerror "no relay identity at ${FEXERVER_ROOT}/node.dano"
+		eerror "generate one with: fex generate <name> --addr <host:port>"
+		return 1
+	fi
+}

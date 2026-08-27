@@ -1,0 +1,18 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Andrei Ilin <ortfero@gmail.com>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+exec 2>&1
+[ -r ./conf ] && . ./conf
+: ${FEXERVER_ROOT:=/var/lib/fexerver}
+: ${FEXERVER_ADDR:=0.0.0.0:4444}
+: ${FEXERVER_WINDOW:=120}
+: ${FEXERVER_USER:=fexerver}
+: ${FEXERVER_GROUP:=fexerver}
+if [ ! -f "${FEXERVER_ROOT}/node.dano" ]; then
+	echo "fexerver: no relay identity at ${FEXERVER_ROOT}/node.dano" >&2
+	sleep 5
+	exit 1
+fi
+exec chpst -u "${FEXERVER_USER}:${FEXERVER_GROUP}" \
+	/usr/bin/fexerver --root "${FEXERVER_ROOT}" --addr "${FEXERVER_ADDR}" \
+	--window "${FEXERVER_WINDOW}"

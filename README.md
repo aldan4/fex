@@ -43,24 +43,29 @@ real binaries, and `just check` for all of it.
 
 ## Running a relay
 
-A relay needs its own identity and a directory of member cards. Generate the
-identity anywhere and move it into place; `--addr` is what makes the generated
-card a relay's card, and `--intro` is an optional public note.
+A relay needs its own identity and a registry of members. Generate the identity
+anywhere and move it into place; `--addr` is what makes the generated card a
+relay's card, and `--intro` is an optional public note.
 
 ```sh
 zig-out/bin/fex generate relay1 --addr relay.example.net:4444 --intro "home relay"
 
-mkdir -p relay-root/members
+mkdir -p relay-root
 mv relay1.dano relay-root/node.dano       # secret, mode 0600, never share it
                                           # relay1.card.dano goes to your members
 ```
 
-Register a member by dropping their card into `members/`. The **file name is
-the member name**, and it becomes their capsule directory on disk:
+Register a member with a line in `roster.danl`, which is the registry and the
+directory the relay publishes at once. The **name is what the member is called
+here**, and it becomes their capsule directory on disk:
 
 ```sh
-cp alice.card.dano relay-root/members/alice.dano
+pub=$(sed -n 's/.*:pub "\([0-9a-f]*\)".*/\1/p' alice.card.dano)
+printf '{:kind "member" :name "alice" :pub "%s"}\n' "$pub" >> relay-root/roster.danl
 ```
+
+`packaging/fexerver-roster` does the same with the mistakes checked for --
+`fexerver-roster add alice alice.card.dano`, `list`, `remove`.
 
 Then serve:
 
@@ -68,9 +73,10 @@ Then serve:
 zig-out/bin/fexerver --root relay-root --addr 0.0.0.0:4444
 ```
 
-The relay keeps `members/` and `capsules/<name>/` under its root, and rereads
-the registry when it changes -- adding or removing a member does not need a
-restart. Ctrl-C stops it.
+The relay keeps `roster.danl`, `objects/` and `capsules/<name>/` under its root,
+and rereads the registry when it changes -- adding or removing a member does not
+need a restart. Ctrl-C stops it. To run it under systemd, OpenRC or runit, see
+[packaging/README.md](packaging/README.md).
 
 ## Using a client
 

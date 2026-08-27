@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 Andrei Ilin <ortfero@gmail.com>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# fexerver runs in the foreground, writes its startup line to stdout and stops
+# on SIGTERM, so it needs nothing but a supervisor. Everything it touches lives
+# under --root: capsules/, objects/, the roster and its own node.dano.
+#
+# Install:
+#   install -m 0644 fexerver.service /etc/systemd/system/fexerver.service
+# Override the defaults with a drop-in rather than by editing this file:
+#   systemctl edit fexerver
+
+[Unit]
+Description=fex capsule relay
+Documentation=https://github.com/aldan4/fex
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=fexerver
+Group=fexerver
+# creates and owns /var/lib/fexerver; change --root below if you move it, and
+# add ReadWritePaths= for the new location
+StateDirectory=fexerver
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/fexerver
+ExecStart=/usr/bin/fexerver --root /var/lib/fexerver --addr 0.0.0.0:4444 --window 120
+Restart=on-failure
+RestartSec=2s
+
+# The relay is single-threaded, opens one UDP socket, reads entropy through
+# getrandom(2) and writes only inside its root.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# AF_UNIX is not the relay's business, but journald's stdout socket is
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

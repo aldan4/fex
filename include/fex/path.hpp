@@ -26,6 +26,11 @@ inline constexpr std::size_t max_path_bytes = 1024;
 // a relay refuses one naming it, and no capsule can overwrite a client's own copy.
 inline constexpr std::string_view inventory_name = "inventory.danl";
 
+// And the relay's published directory, which the client keeps beside the
+// capsules it reads (#6, #10.3). Reserved for the same reason: these two names
+// belong to the service layer, and capsule content cannot claim them (#8).
+inline constexpr std::string_view roster_name = "roster.danl";
+
 namespace detail {
 
 // con, nul, prn, aux, com1-com9, lpt1-lpt9 are reserved on Windows with any extension,
@@ -59,7 +64,7 @@ namespace detail {
 // an empty segment behind, which is_valid_segment already refuses.
 [[nodiscard]] inline bool is_valid_path(std::string_view p) noexcept {
     if (p.empty() || p.size() > max_path_bytes) return false;
-    if (p == inventory_name) return false;
+    if (p == inventory_name || p == roster_name) return false;
     std::size_t at = 0;
     for (;;) {
         const auto slash = p.find('/', at);
@@ -121,7 +126,9 @@ TEST_CASE("path rules follow spec section 8") {
     // The client's own copy of the inventory, reserved at the root of the capsule
     // and nowhere else.
     REQUIRE_FALSE(is_valid_path("inventory.danl"));
+    REQUIRE_FALSE(is_valid_path("roster.danl"));
     REQUIRE(is_valid_path("docs/inventory.danl"));
+    REQUIRE(is_valid_path("docs/roster.danl"));
     // Four maximal segments fit in 1023 bytes; a fifth pushes the path over the limit.
     const std::string seg(255, 'a');
     REQUIRE(is_valid_path(seg + "/" + seg + "/" + seg + "/" + seg));

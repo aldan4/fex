@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Andrei Ilin <ortfero@gmail.com>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# install -m 0644 fexerver.sysusers /usr/lib/sysusers.d/fexerver.conf
+# systemd-sysusers
+u fexerver - "fex capsule relay" /var/lib/fexerver /usr/sbin/nologin

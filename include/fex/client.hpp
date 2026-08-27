@@ -3,10 +3,11 @@
 
 #pragma once
 
-// The client side of fex: publication (#10.1) and restoration (#10.2) of the
-// capsule this node owns, over a channel to one relay.
+// The client side of fex: publication (#10.1), reading a capsule back and
+// discovering who else is on the relay (#10.2), over a channel to one relay.
 
 #include <fex/client/config.hpp>
+#include <fex/client/discover.hpp>
 #include <fex/client/publish.hpp>
 #include <fex/client/requester.hpp>
 #include <fex/client/fetch.hpp>
