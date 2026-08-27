@@ -2,8 +2,10 @@ bin := "zig-out/bin/fexerver"
 client_bin := "zig-out/bin/fex"
 macos_target := "aarch64-macos"
 linux_target := "x86_64-linux-gnu"
+musl_target := "x86_64-linux-musl"
 macos_out := "zig-out/" + macos_target
 linux_out := "zig-out/" + linux_target
+musl_out := "zig-out/" + musl_target
 smoke_dir := "/tmp/fex-smoke"
 smoke_port := "45444"
 
@@ -35,6 +37,14 @@ build-release-macos:
 # Optimized build for Linux, into {{linux_out}}/bin
 build-release-linux:
     zig build -Doptimize=ReleaseFast -Dtarget={{linux_target}} --prefix {{linux_out}}
+
+# Optimized build for Alpine and other musl distros, into {{musl_out}}/bin.
+# zig links musl statically, so this one depends on no libc and runs on a glibc
+# distro as well; a {{linux_target}} build does not run on Alpine at all.
+
+# Optimized, statically linked build for musl, into {{musl_out}}/bin
+build-release-musl:
+    zig build -Doptimize=ReleaseFast -Dtarget={{musl_target}} --prefix {{musl_out}}
 
 # Optimized build for the host, into zig-out/bin (this is the one you can run)
 build-release-host:

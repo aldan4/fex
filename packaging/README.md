@@ -38,13 +38,41 @@ runit/fexerver/                runit service directory (Void)
 
 ## Install, on any of the three
 
-Build for the target and put the binaries in place:
+Build for the target's libc -- **this is the one thing that differs between the
+three** -- and put the binaries in place:
 
 ```sh
+# Alpine, and any other musl distro (Void's musl flavour included)
+zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-musl --prefix /tmp/fex-out
+
+# glibc distros: Debian, Fedora, Arch, Void's default flavour
 zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-gnu --prefix /tmp/fex-out
+
+# an ARM board: swap x86_64 for aarch64 in either line
+
 install -m 0755 /tmp/fex-out/bin/fexerver /usr/bin/fexerver
 install -m 0755 /tmp/fex-out/bin/fex      /usr/bin/fex
 ```
+
+A glibc build will not start on Alpine: it wants `/lib64/ld-linux-x86-64.so.2`,
+which a musl system does not have. The musl build is **statically linked** --
+that is zig's default for musl -- so it depends on no libc at all and will run
+on a glibc distro too, which makes it the safe choice when you are not sure
+what you are deploying to. `file` tells the two apart:
+
+```
+fexerver: ELF 64-bit LSB executable, x86-64, dynamically linked,
+          interpreter /lib64/ld-linux-x86-64.so.2      <- glibc build
+fexerver: ELF 64-bit LSB executable, x86-64, statically linked   <- musl build
+```
+
+Static linking costs nothing here that it usually costs: the relay resolves no
+names, and the `fex` client's `getaddrinfo` works in a static musl binary
+because musl reads `/etc/resolv.conf` itself, where a statically linked glibc
+would need its NSS modules at runtime and fail.
+
+`just build-release-musl` and `just build-release-linux` are the same two
+builds, into `zig-out/<target>/bin`.
 
 Create the service user (it needs no shell and no home of its own):
 
