@@ -103,8 +103,7 @@ include(std::string_view root, const char* card_path) noexcept {
         if (e.pub == card->pub)
             return std::unexpected(std::errc::address_in_use);
     }
-    reg->records.push_back({.name = card->name, .intro = card->intro,
-                            .addr = card->addr, .pub = card->pub});
+    reg->records.push_back(roster::record_of(*card));
     if (auto written = detail::store(root, std::move(*reg)); !written)
         return std::unexpected(written.error());
     return *card;

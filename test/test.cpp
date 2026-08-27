@@ -44,7 +44,7 @@ inline void write_roster(
     const std::vector<std::pair<std::string, fex::crypto::x25519::public_key>>& who) {
     fex::roster::file r;
     for (const auto& [name, pub] : who)
-        r.records.push_back({.name = name, .pub = pub});
+        r.records.push_back(fex::roster::member_record(name, pub));
     const auto text = fex::roster::to_danl(r);
     REQUIRE(fex::fs::ensure_dirs(relay_root).has_value());
     REQUIRE(fex::fs::write_file_atomic(

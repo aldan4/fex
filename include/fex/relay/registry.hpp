@@ -170,8 +170,8 @@ SCENARIO("registry: the roster file is the registry") {
     const auto other = generate_identity();
 
     roster::file r;
-    r.records.push_back({.name = "alice", .pub = alice.pub});
-    r.records.push_back({.name = "bob", .pub = bob.pub});
+    r.records.push_back(roster::member_record("alice", alice.pub));
+    r.records.push_back(roster::member_record("bob", bob.pub));
     put_roster(path, r);
 
     auto reg = relay::registry::load(path);
@@ -191,7 +191,7 @@ SCENARIO("registry: the roster file is the registry") {
     CHECK(reg->hash() == crypto::ascon::hash256(fex::bytes{*on_disk}));
 
     // a relay line reaches every reader and grants nothing: no capsule, no id
-    r.records.push_back({.name = "r2", .addr = "r2.example.net:4444", .pub = other.pub});
+    r.records.push_back(roster::relay_record("r2", "r2.example.net:4444", other.pub));
     put_roster(path, r);
     auto federated = relay::registry::load(path);
     REQUIRE(federated.has_value());
@@ -227,7 +227,7 @@ SCENARIO("registry: the roster file is the registry") {
     auto live = relay::registry::load(dir + "/nothing.danl");
     REQUIRE(live.has_value());
     r.records.clear();
-    r.records.push_back({.name = "alice", .pub = alice.pub});
+    r.records.push_back(roster::member_record("alice", alice.pub));
     put_roster(path, r);
     auto adopted = relay::registry::load(path);
     REQUIRE(adopted.has_value());
@@ -237,7 +237,7 @@ SCENARIO("registry: the roster file is the registry") {
     auto watching = relay::registry::load(path);
     REQUIRE(watching.has_value());
     CHECK(watching->size() == 1);
-    r.records.push_back({.name = "bob", .pub = bob.pub});
+    r.records.push_back(roster::member_record("bob", bob.pub));
     put_roster(path, r);
     const auto reloaded = watching->maybe_reload(path);
     REQUIRE(reloaded.has_value());

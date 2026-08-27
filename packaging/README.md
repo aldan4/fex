@@ -38,27 +38,22 @@ runit/fexerver/                runit service directory (Void)
 
 ## Install, on any of the three
 
-Build for the target's libc -- **this is the one thing that differs between the
-three** -- and put the binaries in place:
+Build one binary for all of Linux. zig links musl statically, so the result
+depends on no libc at all and runs on Alpine, Void, Debian and everything else
+of that architecture:
 
 ```sh
-# Alpine, and any other musl distro (Void's musl flavour included)
 zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-musl --prefix /tmp/fex-out
-
-# glibc distros: Debian, Fedora, Arch, Void's default flavour
-zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-gnu --prefix /tmp/fex-out
-
-# an ARM board: swap x86_64 for aarch64 in either line
+# an ARM board: aarch64-linux-musl
 
 install -m 0755 /tmp/fex-out/bin/fexerver /usr/bin/fexerver
 install -m 0755 /tmp/fex-out/bin/fex      /usr/bin/fex
 ```
 
-A glibc build will not start on Alpine: it wants `/lib64/ld-linux-x86-64.so.2`,
-which a musl system does not have. The musl build is **statically linked** --
-that is zig's default for musl -- so it depends on no libc at all and will run
-on a glibc distro too, which makes it the safe choice when you are not sure
-what you are deploying to. `file` tells the two apart:
+The other direction does not work: a `x86_64-linux-gnu` build wants
+`/lib64/ld-linux-x86-64.so.2`, which a musl system has not got, so Alpine
+answers `not found` for a file that is plainly there. `file` tells the two
+apart:
 
 ```
 fexerver: ELF 64-bit LSB executable, x86-64, dynamically linked,
@@ -66,13 +61,25 @@ fexerver: ELF 64-bit LSB executable, x86-64, dynamically linked,
 fexerver: ELF 64-bit LSB executable, x86-64, statically linked   <- musl build
 ```
 
-Static linking costs nothing here that it usually costs: the relay resolves no
-names, and the `fex` client's `getaddrinfo` works in a static musl binary
-because musl reads `/etc/resolv.conf` itself, where a statically linked glibc
-would need its NSS modules at runtime and fail.
+Static costs nothing here that it usually costs. The relay resolves no names at
+all, and the client's `getaddrinfo` works in a static musl binary because musl
+reads `/etc/resolv.conf` itself -- a statically linked *glibc* would want its
+NSS modules at runtime and fail, which is the usual reason not to do this.
 
-`just build-release-musl` and `just build-release-linux` are the same two
-builds, into `zig-out/<target>/bin`.
+Two things are worth a glibc build anyway (`-Dtarget=x86_64-linux-gnu`, and
+`just build-release-linux`):
+
+- **libc updates.** A static binary carries its own libc, so a libc fix reaches
+  it when you rebuild and reinstall, not when the machine updates. For a daemon
+  on a public port that is a standing errand you have taken on.
+- **Name resolution through NSS**, for the client only. musl reads `/etc/hosts`
+  and `/etc/resolv.conf` and nothing else, so a relay address that resolves
+  through mDNS (`relay.local`), SSSD or another `/etc/nsswitch.conf` module
+  will not resolve in a musl build. A plain hostname or an IP is unaffected.
+
+Neither applies to the relay itself if you keep an eye on your own rebuilds, so
+musl-static is the default here. `just build-release-musl` and
+`just build-release-linux` are the two builds, into `zig-out/<target>/bin`.
 
 Create the service user (it needs no shell and no home of its own):
 

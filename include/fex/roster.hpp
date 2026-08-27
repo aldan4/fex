@@ -59,6 +59,27 @@ struct record {
     return identity_card{.pub = e.pub, .name = e.name, .addr = e.addr, .intro = e.intro};
 }
 
+// A member's record and a relay's, built rather than braced: every field is
+// named here and nowhere else, so a record that grows one does not leave a
+// half-filled aggregate behind at a dozen call sites.
+// and the other way, which is what registering someone comes to (#3)
+[[nodiscard]] inline record record_of(const identity_card& card) {
+    return record{.name = card.name, .intro = card.intro, .addr = card.addr, .pub = card.pub};
+}
+
+[[nodiscard]] inline record member_record(std::string name, crypto::x25519::public_key pub,
+                                          std::string intro = {}) {
+    return record{.name = std::move(name), .intro = std::move(intro), .addr = {}, .pub = pub};
+}
+
+// #6: an addr is what makes a record a relay's, so it is not optional here
+[[nodiscard]] inline record relay_record(std::string name, std::string addr,
+                                         crypto::x25519::public_key pub,
+                                         std::string intro = {}) {
+    return record{.name = std::move(name), .intro = std::move(intro),
+                  .addr = std::move(addr), .pub = pub};
+}
+
 struct file {
     std::vector<record> records;
 
@@ -178,8 +199,8 @@ SCENARIO("canonical output") {
     crypto::x25519::public_key pa{}, pb{};
     REQUIRE(from_hex(pa, "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"));
     REQUIRE(from_hex(pb, "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"));
-    r.records.push_back({.name = "r2", .addr = "r2.example.net:4444", .pub = pb});
-    r.records.push_back({.name = "bob", .pub = pa});
+    r.records.push_back(roster::relay_record("r2", "r2.example.net:4444", pb));
+    r.records.push_back(roster::member_record("bob", pa));
     const auto text = roster::to_danl(r);
     CHECK(text ==
           "{:kind \"id_card\" :name \"bob\" :algo \"x25519\" :pub "
@@ -203,8 +224,8 @@ SCENARIO("canonical output") {
     // the fixture tools/fexcheck/fexref.py publishes, so this canonical form is
     // one three implementations agree on rather than one this file asserts
     roster::file kat;
-    kat.records.push_back({.name = "r2", .addr = "r2.example.net:4444", .pub = pb});
-    kat.records.push_back({.name = "alice", .pub = pa});
+    kat.records.push_back(roster::relay_record("r2", "r2.example.net:4444", pb));
+    kat.records.push_back(roster::member_record("alice", pa));
     const auto kat_text = roster::to_danl(kat);
     CHECK(kat_text.size() == 263);
     CHECK(to_hex(fex::bytes{crypto::ascon::hash256(
@@ -294,7 +315,7 @@ SCENARIO("find names a record") {
     using namespace fex;
     roster::file r;
     crypto::x25519::public_key p{};
-    r.records.push_back({.name = "bob", .pub = p});
+    r.records.push_back(roster::member_record("bob", p));
     CHECK(roster::find(r, "bob") != nullptr);
     CHECK(roster::find(r, "alice") == nullptr);
 }
