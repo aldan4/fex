@@ -3,15 +3,32 @@
 
 #pragma once
 
-// Identity documents (doc/fex_spec.md #3). Two shapes, both dano:
+// Identity documents (doc/fex_spec.md #3). Two shapes, and the difference between
+// them is deliberate:
 //
-//   identity       :kind "identity"      :algo "x25519" :pub "..." :priv "..."
-//   identity card  :kind "identity_card" :algo "x25519" :pub "..." [:addr "..."]
+//   identity  a dano document, unbraced, the secret one
+//     :kind "id" :algo "x25519" :pub "..." :priv "..."
+//
+//   card      a danl record, braced, one line, everything public about a node
+//     {:kind "id_card" :name "alice" :intro "..." :algo "x25519" :pub "..."}
+//     {:kind "id_card" :name "r1" :intro "..." :addr "h:p" :algo "x25519" :pub "..."}
+//
+// A card is a roster record (#6) and nothing more: registering a member is that line
+// appended to the relay's roster.danl, which is why the card is danl and the keys read
+// in the order a person reads them -- who this is, then what it is, then the key.
+//
+// There is one card kind because there is one kind of thing here: what a node says
+// publicly about itself. `addr` is what tells a relay's card from a member's, which
+// is what `--addr` has always meant.
+//
+// The identity stays unbraced, so appending one to a roster is a syntax error rather
+// than a published private key. #6 refuses a record carrying :priv for the same reason.
 //
 // The formats are not part of the protocol -- they are general identity documents, and
-// fex only states requirements on them: the kind above, `algo` = "x25519", and, for a
-// relay's card, an `addr`. Unknown keys are ignored, hex is lowercase, and an identity
-// carries a secret so it is written 0600 and never leaves the node.
+// fex only states requirements on them: the kinds above, a name that #8 accepts,
+// `algo` = "x25519", and, for a relay's card, an `addr`. Unknown keys are ignored, hex
+// is lowercase, and an identity carries a secret so it is written 0600 and never
+// leaves the node.
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -29,6 +46,7 @@
 #include <dano/dano.hpp>
 
 #include <fex/crypto.hpp>
+#include <fex/fs.hpp>
 #include <fex/path.hpp>
 
 #if defined(FEX_WITH_TESTS) || defined(FEX_WITH_BENCHS)
@@ -37,8 +55,10 @@
 
 namespace fex {
 
-inline constexpr std::string_view identity_kind = "identity";
-inline constexpr std::string_view identity_card_kind = "identity_card";
+inline constexpr std::string_view identity_kind = "id";
+// the roster's kind too (#6): a registry line is a card, so there is nothing to
+// translate between the two
+inline constexpr std::string_view identity_card_kind = "id_card";
 inline constexpr std::string_view identity_algo = "x25519";
 
 // The private half is the node's whole security: owner-only, per #3.
@@ -53,13 +73,17 @@ struct identity {
     secret_key priv{};
 };
 
-// `addr` is empty on a member's card and required on a relay's. `intro` is the
-// node's public self-description, carried over from the profile (#3); fex never
-// reads it, it is there for the people working with the registry.
+// `name` is what the node calls itself, and what a relay registering it calls it
+// unless the operator edits the line. `addr` is empty on a member's card and
+// required on a relay's. `intro` is the node's public self-description (#3); fex
+// never reads it, it is there for the people working with the registry.
 struct identity_card {
     public_key pub{};
+    std::string name;
     std::string addr;
     std::string intro;
+
+    [[nodiscard]] bool is_relay() const noexcept { return !addr.empty(); }
 };
 
 // ---- hex -------------------------------------------------------------------
@@ -150,25 +174,30 @@ struct identity_card {
     return out;
 }
 
-[[nodiscard]] inline std::string to_dano(const identity_card& card) {
-    std::string out = ":kind \"";
+// One danl record, which is also one roster line (#6). The keys run in the order a
+// person reads them: who this is, what it is, where it answers, and only then the
+// algorithm and the key.
+[[nodiscard]] inline std::string to_danl(const identity_card& card) {
+    std::string out = "{:kind \"";
     out += identity_card_kind;
-    out += "\" :algo \"";
-    out += identity_algo;
-    out += "\" :pub \"";
-    out += to_hex(card.pub);
+    out += "\" :name \"";
+    out += card.name;
     out += "\"";
-    if (!card.addr.empty()) {
-        out += " :addr \"";
-        out += card.addr;
-        out += "\"";
-    }
     if (!card.intro.empty()) {
         out += " :intro \"";
         out += card.intro;
         out += "\"";
     }
-    out += "\n";
+    if (!card.addr.empty()) {
+        out += " :addr \"";
+        out += card.addr;
+        out += "\"";
+    }
+    out += " :algo \"";
+    out += identity_algo;
+    out += "\" :pub \"";
+    out += to_hex(card.pub);
+    out += "\"}\n";
     return out;
 }
 
@@ -218,7 +247,7 @@ namespace detail {
 // The keys fex looks for. Anything else is left unread, which the map iterator skips
 // on its own as it advances.
 struct fields {
-    std::string_view kind, algo, pub, priv, addr, intro;
+    std::string_view kind, name, algo, pub, priv, addr, intro;
 };
 
 [[nodiscard]] inline std::expected<fields, std::errc> read_fields(dano::value root) noexcept {
@@ -230,6 +259,7 @@ struct fields {
         if (!entry) return std::unexpected(as_errc(entry.error()));
         auto& [key, value] = *entry;
         std::string_view* const slot = key == "kind" ? &f.kind
+                                     : key == "name" ? &f.name
                                      : key == "algo" ? &f.algo
                                      : key == "pub"  ? &f.pub
                                      : key == "priv" ? &f.priv
@@ -257,19 +287,47 @@ struct fields {
     return id;
 }
 
-// `require_addr` is set for a relay's card, where #3 makes `addr` mandatory; a member's
-// card may still carry one, and it is kept if present.
+// `require_addr` is set for a relay's card, where #3 makes `addr` mandatory -- and an
+// addr is the whole difference between a relay's card and a member's. The name goes
+// through the segment rules of #8, because a relay that registers this card makes a
+// directory of it.
 [[nodiscard]] inline std::expected<identity_card, std::errc> card_of(const fields& f,
                                                                      bool require_addr) {
     if (f.kind != identity_card_kind || f.algo != identity_algo)
         return std::unexpected(std::errc::invalid_argument);
+    if (!f.priv.empty()) return std::unexpected(std::errc::invalid_argument); // an identity, not a card
+    if (!is_valid_segment(f.name)) return std::unexpected(std::errc::invalid_argument);
     if (require_addr && f.addr.empty()) return std::unexpected(std::errc::invalid_argument);
     if (!f.addr.empty() && !is_valid_addr(f.addr)) return std::unexpected(std::errc::invalid_argument);
     if (!is_writable_string(f.intro)) return std::unexpected(std::errc::invalid_argument);
     identity_card card;
     if (!from_hex(card.pub, f.pub)) return std::unexpected(std::errc::invalid_argument);
+    card.name = f.name;
     card.addr = f.addr;
     card.intro = f.intro;
+    return card;
+}
+
+// A card is one danl record, so it is read as one: the first record of the stream,
+// and nothing after it.
+//
+// The card is built here rather than the fields handed back, because a reader owns
+// the text it was given and every view dies with it -- `fields` may not outlive this
+// scope, while an identity_card owns its strings.
+[[nodiscard]] inline std::expected<identity_card, std::errc> card_from_danl(
+    std::string_view text, bool require_addr) noexcept {
+    auto reader = ::danl::reader::from_text(text);
+    if (!reader) return std::unexpected(std::errc::invalid_argument);
+    auto records = reader->records();
+    if (!records.has_next()) return std::unexpected(std::errc::invalid_argument);
+    auto rec = records.next();
+    if (!rec) return std::unexpected(std::errc::invalid_argument);
+    const auto f = read_fields(*rec);
+    if (!f) return std::unexpected(f.error());
+    auto card = card_of(*f, require_addr);
+    if (!card) return card;
+    if (records.has_next()) // a card is one record, not the head of a roster
+        return std::unexpected(std::errc::invalid_argument);
     return card;
 }
 
@@ -285,11 +343,7 @@ struct fields {
 
 [[nodiscard]] inline std::expected<identity_card, std::errc>
 parse_identity_card(std::string_view text, bool require_addr = false) {
-    auto reader = dano::reader::from_text(text);
-    if (!reader) return std::unexpected(detail::as_errc(reader.error()));
-    const auto f = detail::read_fields(reader->root());
-    if (!f) return std::unexpected(f.error());
-    return detail::card_of(*f, require_addr);
+    return detail::card_from_danl(text, require_addr);
 }
 
 [[nodiscard]] inline std::expected<identity, std::errc> read_identity(const char* path) noexcept {
@@ -302,11 +356,11 @@ parse_identity_card(std::string_view text, bool require_addr = false) {
 
 [[nodiscard]] inline std::expected<identity_card, std::errc>
 read_identity_card(const char* path, bool require_addr = false) {
-    auto reader = dano::reader::from_file(path);
-    if (!reader) return std::unexpected(detail::as_errc(reader.error()));
-    const auto f = detail::read_fields(reader->root());
-    if (!f) return std::unexpected(f.error());
-    return detail::card_of(*f, require_addr);
+    const auto text = fs::read_file(path);
+    if (!text) return std::unexpected(text.error());
+    return parse_identity_card(
+        std::string_view{reinterpret_cast<const char*>(text->data()), text->size()},
+        require_addr);
 }
 
 // ---- generating ------------------------------------------------------------
@@ -316,11 +370,13 @@ read_identity_card(const char* path, bool require_addr = false) {
     return identity{.pub = kp.pk, .priv = kp.sk};
 }
 
-// The card exports the public half; `addr` turns it into a relay's card.
-[[nodiscard]] inline identity_card card_of(const identity& id, std::string_view addr = {},
+// The card exports the public half under the name the node goes by; `addr` turns it
+// into a relay's card.
+[[nodiscard]] inline identity_card card_of(const identity& id, std::string_view name,
+                                           std::string_view addr = {},
                                            std::string_view intro = {}) {
-    return identity_card{.pub = id.pub, .addr = std::string{addr},
-                         .intro = std::string{intro}};
+    return identity_card{.pub = id.pub, .name = std::string{name},
+                         .addr = std::string{addr}, .intro = std::string{intro}};
 }
 
 } // namespace fex
@@ -360,7 +416,7 @@ TEST_CASE("fingerprint is hash(pub)[0:8] little-endian") {
 TEST_CASE("identity documents round-trip") {
     const auto id = fex::generate_identity();
     const auto text = fex::to_dano(id);
-    REQUIRE(text.starts_with(":kind \"identity\" :algo \"x25519\" :pub \""));
+    REQUIRE(text.starts_with(":kind \"id\" :algo \"x25519\" :pub \""));
 
     const auto parsed = fex::parse_identity(text);
     REQUIRE(parsed.has_value());
@@ -371,58 +427,82 @@ TEST_CASE("identity documents round-trip") {
 TEST_CASE("cards round-trip, with and without an address") {
     const auto id = fex::generate_identity();
 
-    const auto member = fex::card_of(id);
-    const auto member_text = fex::to_dano(member);
+    const auto member = fex::card_of(id, "alice");
+    const auto member_text = fex::to_danl(member);
     REQUIRE(member_text.find(":addr") == std::string::npos);
     const auto read_member = fex::parse_identity_card(member_text);
     REQUIRE(read_member.has_value());
     REQUIRE_EQ(read_member->pub, id.pub);
+    REQUIRE_EQ(read_member->name, "alice");
     REQUIRE(read_member->addr.empty());
+    REQUIRE_FALSE(read_member->is_relay());
 
-    const auto relay = fex::card_of(id, "relay.example.net:4444");
-    const auto read_relay = fex::parse_identity_card(fex::to_dano(relay), true);
+    const auto relay = fex::card_of(id, "r1", "relay.example.net:4444");
+    const auto read_relay = fex::parse_identity_card(fex::to_danl(relay), true);
     REQUIRE(read_relay.has_value());
     REQUIRE_EQ(read_relay->addr, "relay.example.net:4444");
+    REQUIRE(read_relay->is_relay());
 
     // A relay's card without :addr is a configuration error (#3).
     REQUIRE_FALSE(fex::parse_identity_card(member_text, true).has_value());
+
+    // A card is one danl record: braced, one line, and appendable to a roster as
+    // it stands (#6). That is the whole reason it is not a dano document.
+    REQUIRE(member_text.starts_with("{:kind \"id_card\" :name \"alice\""));
+    REQUIRE(member_text.ends_with("\"}\n"));
+
+    // A name is required, and #8 rules it.
+    REQUIRE_FALSE(fex::parse_identity_card(
+        "{:kind \"id_card\" :algo \"x25519\" :pub \"" + fex::to_hex(id.pub) + "\"}\n")
+        .has_value());
+    REQUIRE_FALSE(fex::parse_identity_card(
+        "{:kind \"id_card\" :name \"Alice\" :algo \"x25519\" :pub \""
+        + fex::to_hex(id.pub) + "\"}\n").has_value());
+
+    // An identity is not a card, whatever it is renamed to: the kind differs and
+    // the :priv is refused outright.
+    REQUIRE_FALSE(fex::parse_identity_card(fex::to_dano(id)).has_value());
 }
 
 TEST_CASE("cards carry the profile's intro (#3)") {
     const auto id = fex::generate_identity();
 
     // a member's card: intro without an address
-    const auto member = fex::card_of(id, {}, "family photo archive");
-    const auto member_text = fex::to_dano(member);
+    const auto member = fex::card_of(id, "alice", {}, "family photo archive");
+    const auto member_text = fex::to_danl(member);
     REQUIRE(member_text.find(":addr") == std::string::npos);
     REQUIRE(member_text.find(":intro \"family photo archive\"") != std::string::npos);
     const auto read_member = fex::parse_identity_card(member_text);
     REQUIRE(read_member.has_value());
     REQUIRE_EQ(read_member->intro, "family photo archive");
 
-    // a relay's card: the profile keys follow :pub, in the order of #3
-    const auto relay = fex::card_of(id, "relay.example.net:4444", "home relay");
-    const auto relay_text = fex::to_dano(relay);
-    REQUIRE(relay_text.find(":addr") < relay_text.find(":intro"));
+    // #3 key order: who this is, what it says, where it answers, then the key
+    const auto relay = fex::card_of(id, "r1", "relay.example.net:4444", "home relay");
+    const auto relay_text = fex::to_danl(relay);
+    REQUIRE(relay_text.find(":kind") < relay_text.find(":name"));
+    REQUIRE(relay_text.find(":name") < relay_text.find(":intro"));
+    REQUIRE(relay_text.find(":intro") < relay_text.find(":addr"));
+    REQUIRE(relay_text.find(":addr") < relay_text.find(":algo"));
+    REQUIRE(relay_text.find(":algo") < relay_text.find(":pub"));
     const auto read_relay = fex::parse_identity_card(relay_text, true);
     REQUIRE(read_relay.has_value());
     REQUIRE_EQ(read_relay->addr, "relay.example.net:4444");
     REQUIRE_EQ(read_relay->intro, "home relay");
 
     // no intro means no key at all, and the field reads back empty
-    const auto bare = fex::card_of(id);
-    REQUIRE(fex::to_dano(bare).find(":intro") == std::string::npos);
-    REQUIRE(fex::parse_identity_card(fex::to_dano(bare))->intro.empty());
+    const auto bare = fex::card_of(id, "alice");
+    REQUIRE(fex::to_danl(bare).find(":intro") == std::string::npos);
+    REQUIRE(fex::parse_identity_card(fex::to_danl(bare))->intro.empty());
 
     // a control character survives dano's lexer but would make the card
     // unwritable, so a card carrying one is refused on read
     const auto pub = fex::to_hex(id.pub);
     REQUIRE_FALSE(fex::parse_identity_card(
-        ":kind \"identity_card\" :algo \"x25519\" :pub \"" + pub + "\" :intro \"a\tb\"")
-        .has_value());
+        "{:kind \"id_card\" :name \"alice\" :algo \"x25519\" :pub \"" + pub
+        + "\" :intro \"a\tb\"}").has_value());
     REQUIRE(fex::parse_identity_card(
-        ":kind \"identity_card\" :algo \"x25519\" :pub \"" + pub + "\" :intro \"a b\"")
-        .has_value());
+        "{:kind \"id_card\" :name \"alice\" :algo \"x25519\" :pub \"" + pub
+        + "\" :intro \"a b\"}").has_value());
     REQUIRE_FALSE(fex::is_writable_string("say \"hi\""));
     REQUIRE(fex::is_writable_string("family photo archive"));
 }
@@ -436,19 +516,19 @@ TEST_CASE("malformed identity documents are refused") {
              + "\" :pub \"" + std::string{p} + "\" :priv \"" + priv + "\"\n";
     };
 
-    REQUIRE(fex::parse_identity(document("identity", "x25519", pub)).has_value());
-    REQUIRE_FALSE(fex::parse_identity(document("identity_card", "x25519", pub)).has_value());
-    REQUIRE_FALSE(fex::parse_identity(document("identity", "ed25519", pub)).has_value());
-    REQUIRE_FALSE(fex::parse_identity(document("identity", "x25519", "zz")).has_value());
+    REQUIRE(fex::parse_identity(document("id", "x25519", pub)).has_value());
+    REQUIRE_FALSE(fex::parse_identity(document("id_card", "x25519", pub)).has_value());
+    REQUIRE_FALSE(fex::parse_identity(document("id", "ed25519", pub)).has_value());
+    REQUIRE_FALSE(fex::parse_identity(document("id", "x25519", "zz")).has_value());
     REQUIRE_FALSE(fex::parse_identity(":algo \"x25519\" :pub \"" + pub + "\"\n").has_value());
-    REQUIRE_FALSE(fex::parse_identity(":kind \"identity\" :algo").has_value()); // truncated
+    REQUIRE_FALSE(fex::parse_identity(":kind \"id\" :algo").has_value()); // truncated
 
     // A public key that does not belong to the private one means a corrupt file.
     const auto other = fex::generate_identity();
-    REQUIRE_FALSE(fex::parse_identity(document("identity", "x25519", fex::to_hex(other.pub))).has_value());
+    REQUIRE_FALSE(fex::parse_identity(document("id", "x25519", fex::to_hex(other.pub))).has_value());
 
     // Unknown keys are ignored, whatever they hold.
-    const auto extra = ":note \"whatever\" :kind \"identity\" :algo \"x25519\" :pub \"" + pub
+    const auto extra = ":note \"whatever\" :kind \"id\" :algo \"x25519\" :pub \"" + pub
                      + "\" :priv \"" + priv + "\" :tags [1 2 3]\n";
     REQUIRE(fex::parse_identity(extra).has_value());
 }

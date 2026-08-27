@@ -252,7 +252,7 @@ SCENARIO("requester: a deaf relay times out") {
 
     const auto self = generate_identity();
     const auto relay = generate_identity();
-    auto card = card_of(relay, addr->to_string());
+    auto card = card_of(relay, "hub", addr->to_string());
 
     client::net_options opts;
     opts.request_timeout_ms = 20;

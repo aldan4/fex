@@ -15,7 +15,7 @@
 description="fex capsule relay"
 
 command="/usr/bin/fexerver"
-command_args="--root ${FEXERVER_ROOT} --addr ${FEXERVER_ADDR} --window ${FEXERVER_WINDOW}"
+command_args="serve --root ${FEXERVER_ROOT} --addr ${FEXERVER_ADDR} --window ${FEXERVER_WINDOW}"
 command_user="${FEXERVER_USER}:${FEXERVER_GROUP}"
 supervisor="supervise-daemon"
 pidfile="/run/fexerver.pid"

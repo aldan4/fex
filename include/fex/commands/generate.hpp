@@ -19,7 +19,7 @@ inline constexpr std::string_view synopsis =
     "  fex generate <name> [--dir <path>] [--addr <host:port>] [--intro <text>]\n";
 inline constexpr std::string_view summary =
     "  generate <name>         create an x25519 identity <name>.dano and its\n"
-    "                          card <name>.card.dano\n";
+    "                          card <name>.card.danl\n";
 inline constexpr std::string_view options =
     "  -d, --dir <path>        directory to write into (default: current)\n"
     "  -a, --addr <host:port>  relay address to record in the card, which makes\n"
@@ -55,17 +55,17 @@ inline int write_identity_pair(std::string_view node, std::string_view dir,
         return fail("--intro may not contain quotes or control characters");
 
     const auto identity_path = join(dir, std::string{node} + ".dano");
-    const auto card_path = join(dir, std::string{node} + ".card.dano");
+    const auto card_path = join(dir, std::string{node} + ".card.danl");
 
     const auto id = generate_identity();
-    const auto card = card_of(id, addr, intro);
+    const auto card = card_of(id, node, addr, intro);
 
     if (const auto written = write_new_file(identity_path.c_str(), to_dano(id),
                                             identity_mode);
         !written)
         return fail("cannot write {}: {}", identity_path, message(written.error()));
 
-    if (const auto written = write_new_file(card_path.c_str(), to_dano(card),
+    if (const auto written = write_new_file(card_path.c_str(), to_danl(card),
                                             identity_card_mode);
         !written) {
         ::unlink(identity_path.c_str());

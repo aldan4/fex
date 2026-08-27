@@ -50,27 +50,29 @@ Registries are danl streams, one line per node.
 relay:   roster.danl       -- the registry and the published directory (#6)
                               in one file: members have put/commit rights
                               and a capsule each
-client:  keys/relays.danl  -- the member's relays; lines are the relay's
-                              card plus :name, and additionally require
-                              :addr
+client:  keys/relays.danl  -- the member's relays; lines are the relays'
+                              cards, which carry :addr by definition
 ```
 
-- A relay's registry is the roster of #6, in the roster's own form: a role, a
-  `:name` and a `:pub`, and nothing else. It is what `list` points at and what
-  `get` serves, byte for byte, so there is no second file and nothing to keep
+- A relay's registry is the roster of #6, and a line of it is a card of this
+  section, unchanged. It is what `list` points at and what `get` serves, byte
+  for byte, so there is no second file, nothing to render and nothing to keep
   in step.
-- An address has no place in it, since the roster must not carry one (#6).
-  That is why federation is not here yet: a federated relay has to be
-  reachable, so its address needs a file of its own, beside this one and
-  never published. A `relay` line already reaches every reader; it grants
-  nothing until that file exists.
-- Registration is appending a line; removal is deleting the line plus
+- A record carrying an `:addr` is a relay's card. It reaches every reader and
+  grants nothing until federation lands: a relay serves capsules to the
+  members of its registry, and a card with an address is not one of them.
+- Registration is appending the node's card; removal is deleting the line plus
   flushing the node's addr cache entry; renaming is editing `:name`.
 - The id -> node map is built from the registry and rebuilt whenever it
   changes; a relay re-reads the file when its mtime moves, and a file that
   fails to parse leaves the registry it is already serving in place.
-- Registry errors are the roster's own (#6), plus: two records mapping to one
-  id, and an id equal to zero.
+- Registry errors are the roster's own (#6), plus: two records carrying one
+  `name` or one `pub`, two mapping to one id, and an id equal to zero. The
+  duplicate rules live here rather than in #6's reader because deciding them
+  needs the whole file: the registry is the one place it is all in hand at
+  once, and the relay is the only thing that writes it.
+- A relay that cannot read its registry does not start; one already running
+  keeps the registry it has and says so.
 - `:name` follows the segment rules of #8; the reserved names of #8 are
   forbidden as node names.
 
@@ -78,11 +80,15 @@ The file format is dano (`.dano` document, `.danl` stream); binary values are
 lowercase hex; unknown keys are ignored. Key files are general-purpose
 identity documents; fex imposes only the requirements below.
 
-**Identity** (mode 0600, never transmitted, not edited after generation):
+**Identity** - a dano document, unbraced (mode 0600, never transmitted, not
+edited after generation):
 
 ```
-:kind "identity"  :algo "x25519"  :pub "9f2c..."  :priv "a01b..."
+:kind "id"  :algo "x25519"  :pub "9f2c..."  :priv "a01b..."
 ```
+
+It is unbraced deliberately: an identity is not a danl record, so appending one
+to a roster (#6) is a syntax error rather than a published private key.
 
 **Profile** - an optional non-secret file holding a node's public
 self-description; arbitrary keys are allowed except the reserved `:kind`,
@@ -93,19 +99,32 @@ self-description; arbitrary keys are allowed except the reserved `:kind`,
 :kind "profile"  :name "r1"  :addr "relay.example.net:4444"  :intro "home relay"
 ```
 
-**Card** is generated; manual editing is not expected:
+**Card** - a danl record: braced, one line, everything public about a node. It
+is generated, and it is also a roster record (#6), which is what registration
+consists of:
 
 ```
-card = {:kind "identity_card", :algo, :pub from the identity} + all profile
-       keys except :kind
+card = {:kind "id_card", :name, :algo, :pub} + all profile keys except :kind
 ```
 
-fex requires: `:kind "identity"` for the node key, `:kind "identity_card"`
-for cards, `:algo "x25519"`; lines in `keys/relays.danl` additionally require
-`:addr`. A document with a different `kind`/`algo`, or missing a required key,
-is a configuration error. The protocol reads no other card fields -- which is
-why a relay's registry keeps none of them: the name and the key are the whole
-of what registration means to it.
+```
+{:kind "id_card" :name "alice" :intro "family photo archive" :algo "x25519" :pub "9f2c..."}
+{:kind "id_card" :name "r1" :intro "home relay" :addr "relay.example.net:4444" :algo "x25519" :pub "77aa..."}
+```
+
+Key order is `:kind :name :intro :addr :algo :pub`: who this is, what it says
+about itself, where it answers, and only then the algorithm and the key -- the
+order a person reads, not the order a machine needs.
+
+There is one card kind, because there is one kind of thing here: what a node
+says publicly about itself. `:addr` is what tells a relay's card from a
+member's, which is what generating with an address has always meant.
+
+fex requires: `:kind "id"` for the node key, `:kind "id_card"` for cards,
+`:algo "x25519"`, a `:name` that #8 accepts, and `:addr` on a relay's card. A
+document with a different `kind`/`algo`, or missing a required key, is a
+configuration error. A card carrying `:priv` is refused: that is an identity
+under a card's name.
 
 ## 4. Outer layer
 
@@ -295,25 +314,39 @@ name is the hash of its content.
   object that has not been checked for a long time is served, not touching
   objects younger than a day.
 
-**Roster** - the relay's published directory, identity only. It is the
-registry of #3 itself: the relay reads its members from these lines and
+**Roster** - the relay's published directory. Every line is a card (#3), so
+registering someone is their card appended to this file and nothing else. It is
+the registry of #3 itself: the relay reads its members from these lines and
 serves the same bytes back, so `list` (#5) answers with the size and hash of
-the file on disk and `get` fetches that file. `:addr` never appears in it:
+the file on disk and `get` fetches that file:
 
 ```
-{:kind "member" :name "bob" :pub "9f2c..."}
-{:kind "relay"  :name "r2"  :pub "77aa..."}
+{:kind "id_card" :name "bob" :algo "x25519" :pub "9f2c..."}
+{:kind "id_card" :name "r2" :addr "relay.example.net:4444" :algo "x25519" :pub "77aa..."}
 ```
 
-- Canonical form (for writing): key order is exactly `:kind :name :pub`; a
-  single space between pairs, no comments; lowercase hex; lines sorted
-  bytewise by `name`; every line terminated by `\n`, including the last. A
-  relay serves the file as it stands rather than re-rendering it, so the
-  canonical form is what whoever edits the registry is expected to write.
+A record with an `:addr` is a relay's and grants nothing until federation
+lands; one without is a member, and is what the relay serves a capsule for.
+There is no separate member/relay kind to keep in step with the addr.
+
+- Canonical form (for writing): the card form of #3 -- key order `:kind :name
+  :intro :addr :algo :pub`, a single space between pairs, no comments,
+  lowercase hex; lines sorted bytewise by `name`; every line terminated by
+  `\n`, including the last. A relay serves the file as it stands rather than
+  re-rendering it, so the canonical form is what whoever edits the registry is
+  expected to write -- and it is exactly what `generate` wrote in the card.
 - Reading: required keys in any order; unknown keys are ignored; a record
   with an unknown `:kind` is ignored as a whole. The roster is rejected as
-  a whole on: a syntax error, a missing required key, a duplicate `name` or
-  `pub` across the file, invalid hex, or a `name` violating #8.
+  a whole on: a syntax error, a missing required key, a `:priv` in any record,
+  invalid hex, an unusable `:addr`, or a `name` violating #8. Every one of
+  these is decidable on the record in hand, so a reader may walk the file and
+  keep nothing but the record it stands on.
+- The registry's own rule: no two records may carry the same `name` or the
+  same `pub`. This binds whoever writes the file, not whoever reads it --
+  deciding it needs a memory of the whole file, which a node walking a served
+  roster has no reason to keep. A relay refuses a registry that breaks it (#3)
+  and so never serves one; a reader that does hold the whole file may refuse
+  as well, and nothing it would refuse can reach it from a conforming relay.
 
 ## 7. Inventory
 
@@ -476,11 +509,11 @@ against the hash that named it before the rename puts it in place.
     state/staging/<hex>         -- uploads/downloads in progress
   peers/<relay>/                -- everything read from this relay: one's
                                    own relay and federated ones, uniformly
-    card.dano                   -- pinned relay identity
+    card.danl                   -- pinned relay identity (a card, #3)
     roster.danl                 -- the relay's roster as last known
     state/staging/<hex>         -- roster staging
     <member>/
-      card.dano                 -- pinned member identity
+      card.danl                 -- pinned member identity (a card, #3)
       files/                    -- the member's capsule, read-only
       files/inventory.danl      -- their inventory as last known
       state/staging/<hex>
@@ -490,7 +523,7 @@ against the hash that named it before the rename puts it in place.
   `<relay>` is `:name` from `keys/relays.danl` for one's own relay and
   `:name` from the own relay's roster for a federated one; `<member>` is
   `:name` from that relay's roster.
-- `card.dano` pins identity: written on first contact from the registry
+- `card.danl` pins identity: written on first contact from the registry
   line or roster record that introduced the node. A later roster naming a
   different pub under the same name is a hard stop with an explicit error,
   never an overwrite. A remote rename produces a new directory; the old one

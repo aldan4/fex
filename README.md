@@ -4,18 +4,23 @@ A capsule synchronization protocol over UDP. Each member owns exactly one
 **capsule** -- a local directory published to a **relay** and read back from it,
 byte for byte, a file at a time. The relay stores capsules without interpreting
 their contents; there is no access to other members' capsules and no anonymous
-access.
+access. What a relay does publish to its members is its **roster**: the name,
+the key and the self-description of everyone registered on it.
 
 Members are identified by an x25519 key pair. A channel key is derived locally
 on both sides (`hash(dh(priv, pub))[0:16]`), so there is no handshake and no
 durable channel state: the channel exists for as long as the member's card sits
-in the relay's registry. Every datagram is sealed with ascon-aead128, and
-publication is transactional -- a capsule on the relay always matches its
-inventory, even across a crash mid-commit.
+in the relay's registry -- literally, since the registry is a file of cards.
+Every datagram is sealed with ascon-aead128, and publication is transactional --
+a capsule on the relay always matches its inventory, even across a crash
+mid-commit.
 
 The protocol is specified in [doc/fex_spec.md](doc/fex_spec.md). The
 implementation is header-only C++23 under `include/fex/`, with two thin
-executables: `fexerver` (the relay) and `fex` (the client).
+executables: `fexerver` (the relay: `serve`, `include`, `exclude`, `roster`) and
+`fex` (the client: `generate`, `publish`, `inventory`, `fetch`, `roster`).
+Running a relay for real -- as a service, with a user of its own and the paths
+and modes that go with it -- is [packaging/README.md](packaging/README.md).
 
 ## Requirements
 
@@ -52,31 +57,73 @@ zig-out/bin/fex generate relay1 --addr relay.example.net:4444 --intro "home rela
 
 mkdir -p relay-root
 mv relay1.dano relay-root/node.dano       # secret, mode 0600, never share it
-                                          # relay1.card.dano goes to your members
+                                          # relay1.card.danl goes to your members
 ```
 
-Register a member with a line in `roster.danl`, which is the registry and the
-directory the relay publishes at once. The **name is what the member is called
-here**, and it becomes their capsule directory on disk:
+Register a member by their card. `roster.danl` is the registry and the
+directory the relay publishes at once, and a card **is** one of its records --
+there is nothing to extract and nothing to rewrite:
 
 ```sh
-pub=$(sed -n 's/.*:pub "\([0-9a-f]*\)".*/\1/p' alice.card.dano)
-printf '{:kind "member" :name "alice" :pub "%s"}\n' "$pub" >> relay-root/roster.danl
+zig-out/bin/fexerver include alice.card.danl --root relay-root
+zig-out/bin/fexerver roster --root relay-root
+zig-out/bin/fexerver exclude alice --root relay-root
 ```
 
-`packaging/fexerver-roster` does the same with the mistakes checked for --
-`fexerver-roster add alice alice.card.dano`, `list`, `remove`.
+`cat alice.card.danl >> relay-root/roster.danl` is the same registration; what
+the command adds is refusing the few things that would take the whole file
+down -- a duplicate name or key, a card that is really an identity, hex that is
+not hex -- and writing the file whole rather than in part.
+
+The name the member goes by here is the `:name` in the card, which is the name
+they generated with. Renaming someone is editing that one field; the key is what
+the relay actually goes by. A line reads as a person would:
+
+```
+{:kind "id_card" :name "alice" :intro "family photo archive" :algo "x25519" :pub "8520f009...9b4e6a"}
+```
 
 Then serve:
 
 ```sh
-zig-out/bin/fexerver --root relay-root --addr 0.0.0.0:4444
+zig-out/bin/fexerver serve --root relay-root --addr 0.0.0.0:4444
 ```
 
 The relay keeps `roster.danl`, `objects/` and `capsules/<name>/` under its root,
 and rereads the registry when it changes -- adding or removing a member does not
-need a restart. Ctrl-C stops it. To run it under systemd, OpenRC or runit, see
+need a restart. Ctrl-C stops it. A roster it cannot read is a refusal to start,
+not a warning.
+
+That is a relay in a directory you own, which is the right shape for trying one.
+For a relay that outlives your shell, see below and then
 [packaging/README.md](packaging/README.md).
+
+## Running it as a service
+
+`fexerver serve` stays in the foreground, says one line, writes only under its
+`--root` and stops on `SIGTERM`, so any supervisor can run it as it is. The
+files are in [packaging/](packaging):
+
+```sh
+# systemd
+install -m 0644 packaging/systemd/fexerver.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now fexerver
+
+# OpenRC (Alpine)
+install -m 0755 packaging/openrc/fexerver.initd /etc/init.d/fexerver
+install -m 0644 packaging/openrc/fexerver.confd /etc/conf.d/fexerver
+rc-update add fexerver default && rc-service fexerver start
+
+# runit (Void)
+cp -r packaging/runit/fexerver /etc/sv/fexerver
+ln -s /etc/sv/fexerver /var/service/
+```
+
+All three run `/usr/bin/fexerver serve` on `/var/lib/fexerver` as a `fexerver`
+user. The operator's guide, **[packaging/README.md](packaging/README.md)**, has
+the rest: the service user, the relay's identity, which path is owned by whom
+and in what mode, registration, backups, the firewall rule, and what the startup
+failures mean.
 
 ## Using a client
 
@@ -88,14 +135,18 @@ independent channel before trusting a card.
 zig-out/bin/fex generate alice --intro "family photo archive"
 ```
 
-Lay out the client root. The relay card must be named `<relay>.relay.dano`, and
+That writes two files: `alice.dano`, the identity, which stays on this machine
+and nowhere else, and `alice.card.danl`, the card, which is the public half and
+the line a relay registers you by.
+
+Lay out the client root. The relay card must be named `<relay>.relay.danl`, and
 the capsule directory `<name>@<relay>` must use the same `<relay>`; the content
 itself goes in `files/` inside it:
 
 ```sh
 mkdir -p client-root/keys client-root/self/notes@relay1/files
 mv alice.dano             client-root/keys/node.dano
-cp relay1.card.dano       client-root/keys/relay1.relay.dano
+cp relay1.card.danl       client-root/keys/relay1.relay.danl
 ```
 
 Put whatever you want to sync into `files/`, then publish:
@@ -131,7 +182,27 @@ yours to read, not to write.
 
 Capsule contents are regular files with lowercase ASCII names; symlinks,
 special files and unrepresentable names abort a publication rather than being
-silently skipped. Run `fex help` for the full option list.
+silently skipped.
+
+To see who else is on the relay, ask for its directory:
+
+```sh
+zig-out/bin/fex roster --root client-root --name notes
+```
+
+```
+relay relay1, 2 record(s)
+alice  c1456e845f7dd6ec  family photo archive
+carol  d04336ea9d51fac7  a bystander
+```
+
+A row is a name, a fingerprint and whatever that member wrote about itself --
+the card they handed the relay, which is the registry line itself. The file
+lands at `client-root/peers/relay1/roster.danl` and is refreshed only when the
+relay's copy has changed, so asking twice transfers nothing the second time.
+It is the relay's own file, byte for byte: nothing is rendered at either end.
+
+Run `fex help` for the full option list.
 
 ## License
 

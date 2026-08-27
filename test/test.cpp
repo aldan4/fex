@@ -44,7 +44,7 @@ inline void write_roster(
     const std::vector<std::pair<std::string, fex::crypto::x25519::public_key>>& who) {
     fex::roster::file r;
     for (const auto& [name, pub] : who)
-        r.records.push_back({fex::roster::kind::member, name, pub});
+        r.records.push_back({.name = name, .pub = pub});
     const auto text = fex::roster::to_danl(r);
     REQUIRE(fex::fs::ensure_dirs(relay_root).has_value());
     REQUIRE(fex::fs::write_file_atomic(
@@ -139,8 +139,8 @@ SCENARIO("end to end: publish, list, fetch, mutate, converge") {
         REQUIRE(fs::ensure_dirs(root + "/keys").has_value());
         REQUIRE(write_new_file((root + "/keys/node.dano").c_str(), to_dano(alice),
                                identity_mode).has_value());
-        REQUIRE(write_new_file((root + "/keys/hub.relay.dano").c_str(),
-                               to_dano(card_of(relay_id, addr)),
+        REQUIRE(write_new_file((root + "/keys/hub.relay.danl").c_str(),
+                               to_danl(card_of(relay_id, "hub", addr)),
                                identity_card_mode).has_value());
     }
 
@@ -424,8 +424,8 @@ SCENARIO("two members, one relay: separate capsules, one object store") {
         REQUIRE(fs::ensure_dirs(root + "/keys").has_value());
         REQUIRE(write_new_file((root + "/keys/node.dano").c_str(), to_dano(who),
                                identity_mode).has_value());
-        REQUIRE(write_new_file((root + "/keys/hub.relay.dano").c_str(),
-                               to_dano(card_of(relay_id, addr)),
+        REQUIRE(write_new_file((root + "/keys/hub.relay.danl").c_str(),
+                               to_danl(card_of(relay_id, "hub", addr)),
                                identity_card_mode).has_value());
     }
 

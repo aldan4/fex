@@ -501,7 +501,7 @@ inline void write_roster(
     const std::vector<std::pair<std::string, fex::crypto::x25519::public_key>>& who) {
     fex::roster::file r;
     for (const auto& [name, pub] : who)
-        r.records.push_back({fex::roster::kind::member, name, pub});
+        r.records.push_back({.name = name, .pub = pub});
     const auto text = fex::roster::to_danl(r);
     REQUIRE(fex::fs::write_file_atomic(
                 root + "/roster.danl",
@@ -785,7 +785,7 @@ SCENARIO("server: list -> roster, and the roster follows the registry") {
     REQUIRE(parsed.has_value());
     REQUIRE(parsed->records.size() == 1);
     CHECK(parsed->records[0].name == "alice");
-    CHECK(parsed->records[0].what == roster::kind::member);
+    CHECK(parsed->records[0].what() == roster::kind::member);
     CHECK(parsed->records[0].pub == alice.pub);
     // identity only: an address never appears here (#6)
     CHECK(std::string_view{reinterpret_cast<const char*>(text->data()), text->size()}
@@ -839,7 +839,7 @@ SCENARIO("server: a roster it cannot read stops it before the port is opened") {
 
     // #6 refuses a roster whole, and #8 refuses the name: one bad line is all it
     // takes, which is what a half-finished hand edit leaves behind
-    const std::string bad = "{:kind \"member\" :name \"BOB\" :pub \"zz\"}\n";
+    const std::string bad = "{:kind \"id_card\" :name \"BOB\" :pub \"zz\"}\n";
     REQUIRE(fs::write_file_atomic(
                 root + "/roster.danl",
                 fex::bytes{reinterpret_cast<const u8*>(bad.data()), bad.size()})

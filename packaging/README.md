@@ -1,13 +1,13 @@
 # Running a relay as a service
 
-`fexerver` is already shaped for supervision: it stays in the foreground, says
-one line on startup, writes nothing per request, keeps everything under its
+`fexerver serve` is already shaped for supervision: it stays in the foreground,
+says one line on startup, writes nothing per request, keeps everything under its
 `--root`, and stops on `SIGTERM`. It does not daemonize, drop privileges, write
 a pid file or reopen logs -- the service manager does all of that.
 
-This directory carries the files for the three init systems, plus
-`fexerver-roster`, a small helper for the one operational task that is
-otherwise hand-editing: registering members.
+This directory carries the files for the three init systems. Registering
+members needs nothing from here: `fexerver include` and `fexerver exclude` are
+commands of the relay itself.
 
 ```
 systemd/fexerver.service       systemd unit
@@ -15,20 +15,21 @@ systemd/fexerver.sysusers      sysusers.d fragment for the service user
 openrc/fexerver.initd          OpenRC service (Alpine and friends)
 openrc/fexerver.confd          its settings
 runit/fexerver/                runit service directory (Void)
-fexerver-roster                register, unregister and list members
 ```
 
 ## What the relay needs
 
 - **A writable root.** `capsules/` and `objects/` are created there, and every
   temporary file is written and renamed inside it. Nothing is written anywhere
-  else -- no `/tmp`, no state outside the root.
+  else -- no `/tmp`, no state outside the root. *Paths and access rights* below
+  says who owns what.
 - **`<root>/node.dano`**, the relay's identity, mode 0600, readable by the
   service user. It is a secret: it is what makes this relay *this* relay, and a
   lost one cannot be regenerated -- every member's card would have to be
   reissued.
-- **`<root>/roster.danl`**, the member registry. A missing file means a relay
-  nobody is registered on yet, which starts fine.
+- **`<root>/roster.danl`**, the member registry: one card per line. A missing
+  file means a relay nobody is registered on yet, which starts fine; an
+  unreadable one stops the relay from starting at all.
 - **A UDP port.** 4444 by default, above 1024, so no capability is needed. If
   you move it below 1024, add `AmbientCapabilities=CAP_NET_BIND_SERVICE` (and
   the matching `CapabilityBoundingSet=`) to the unit.
@@ -43,7 +44,6 @@ Build for the target and put the binaries in place:
 zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-gnu --prefix /tmp/fex-out
 install -m 0755 /tmp/fex-out/bin/fexerver /usr/bin/fexerver
 install -m 0755 /tmp/fex-out/bin/fex      /usr/bin/fex
-install -m 0755 packaging/fexerver-roster /usr/bin/fexerver-roster
 ```
 
 Create the service user (it needs no shell and no home of its own):
@@ -72,11 +72,63 @@ install -d -o fexerver -g fexerver -m 0750 /var/lib/fexerver
 fex generate relay1 --dir /tmp --addr relay.example.net:4444 --intro "home relay"
 install -o fexerver -g fexerver -m 0600 /tmp/relay1.dano /var/lib/fexerver/node.dano
 rm -f /tmp/relay1.dano                # the copy outside the root is not wanted
-# /tmp/relay1.card.dano is the public half: that is what you hand to members
+# /tmp/relay1.card.danl is the public half: that is what you hand to members
 ```
 
 Compare the fingerprint printed by `generate` with your members over some
 independent channel before they trust the card.
+
+## Paths and access rights
+
+Everything the relay owns lives under one directory, and one system user owns
+that directory. Nothing else needs write access to anything.
+
+| path | owner | mode | who makes it |
+|---|---|---|---|
+| `/usr/bin/fexerver` | `root:root` | `0755` | you, from the build |
+| `/var/lib/fexerver` | `fexerver:fexerver` | `0750` | you, or `StateDirectory=` |
+| `/var/lib/fexerver/node.dano` | `fexerver:fexerver` | `0600` | you, from `fex generate` |
+| `/var/lib/fexerver/roster.danl` | any, readable by the service | `0644` | `fexerver include` |
+| `/var/lib/fexerver/objects/` | `fexerver:fexerver` | umask | the relay, at first start |
+| `/var/lib/fexerver/capsules/` | `fexerver:fexerver` | umask | the relay, at first start |
+| `/var/log/fexerver.log` (OpenRC) | `fexerver:fexerver` | `0640` | `start_pre` |
+| `/var/log/fexerver/` (runit) | `_log:_log` | `0750` | `log/run` |
+
+What the relay makes for itself it makes `0755` and `0644`, filtered through the
+service umask: under the shipped systemd unit, which sets `UMask=0077`, that
+lands as `0700` and `0600`; under the OpenRC and runit scripts it follows
+whatever umask the supervisor was started with, usually `0022`.
+
+Either way the mode that matters is the root's. `0750` on `/var/lib/fexerver`
+means no other user can traverse into it, so what the files inside say is moot
+-- an `ls -l` showing `-rw-r--r--` on an object is not a leak. Tighten the root,
+not the files under it.
+
+`node.dano` is the exception that does not depend on any of this: it is written
+`0600` outright, whatever the umask, and it is the one file whose loss cannot be
+repaired.
+
+`roster.danl` is public by design -- it is what the relay serves to its
+members -- so `0644` is right, and it is the one file you edit. Run
+`fexerver include`/`exclude` either as the service user or as root:
+
+```sh
+sudo -u fexerver fexerver include alice.card.danl --root /var/lib/fexerver
+```
+
+Run as root, the rewritten file ends up `root:root 0644`, which the relay reads
+perfectly well -- it never writes that file, only reads it and serves its bytes.
+Run as the service user, it stays `fexerver:fexerver`. Either is fine; what is
+not fine is a root directory the service user cannot write, since the relay
+creates `objects/` and `capsules/` itself and stages every upload inside them.
+
+To check a root over:
+
+```sh
+sudo -u fexerver test -w /var/lib/fexerver && echo "writable by the service"
+sudo -u fexerver test -r /var/lib/fexerver/node.dano && echo "identity readable"
+stat -c '%U:%G %a %n' /var/lib/fexerver /var/lib/fexerver/node.dano
+```
 
 ## systemd
 
@@ -94,7 +146,7 @@ change `--root` and add `ReadWritePaths=` for it. Change settings with a
 drop-in rather than by editing the unit:
 
 ```sh
-systemctl edit fexerver     # [Service] / ExecStart= / ExecStart=/usr/bin/fexerver --root ... --addr ...
+systemctl edit fexerver     # [Service] / ExecStart= / ExecStart=/usr/bin/fexerver serve --root ...
 ```
 
 The unit is hardened down to what the relay actually does: no capabilities, a
@@ -131,34 +183,52 @@ tail -f /var/log/fexerver/current
 
 ## Registering members
 
-The roster is the registry and the published directory at once: one line per
-member, `{:kind "member" :name "alice" :pub "<64 hex>"}`. The name is what the
-member is called here and the directory their capsule gets.
+The roster is the registry and the published directory at once, and every line
+is a card -- so registering someone is their card added to it:
 
 ```sh
-fexerver-roster add alice /path/to/alice.card.dano
-fexerver-roster list
-fexerver-roster remove alice
+fexerver include /path/to/alice.card.danl --root /var/lib/fexerver
+fexerver roster --root /var/lib/fexerver
+fexerver exclude alice --root /var/lib/fexerver
 ```
+
+`include` writes the card's line and nothing else, refusing a name or a key
+already registered (#3) and an identity file handed over in a card's place. It
+writes the whole file at once, so a relay reading it mid-change reads one state
+or the other. `exclude` takes the line out and leaves `capsules/<name>/` alone:
+what a member published is theirs.
+
+Run them as the service user, or as root -- the file is rewritten in place with
+the ownership it had:
+
+```sh
+install -d -o fexerver -g fexerver -m 0750 /var/lib/fexerver
+sudo -u fexerver fexerver include alice.card.danl --root /var/lib/fexerver
+```
+
+The name the member goes by here is the `:name` in their card. Renaming someone
+is editing that field in the line; the key is what the relay goes by.
 
 The relay picks the change up on the next request it serves, and rereads the
 file at most once a second -- adding or removing a member needs no restart and
 no signal. `remove` takes the member out of the registry but leaves
 `capsules/<name>/` on disk; delete it yourself if that is what you mean.
 
-Hand-editing the file works too, and the helper only saves you from the ways it
-can go wrong: a duplicate name or key, a capital letter in a name, uppercase
-hex, or a half-written file. Any of those makes the roster invalid, and an
-invalid roster is refused **whole** -- the relay keeps serving the registry it
-had before, so everyone already registered carries on and the new member simply
-never appears. It says so once per edit:
+Hand-editing works too -- `cat alice.card.danl >> roster.danl` is the same
+registration -- and the commands only save you from the ways that goes wrong: a
+duplicate name or key, a capital letter in a name, uppercase hex, an identity
+file pasted where a card was meant, or a half-written file. Any of those makes
+the roster invalid, and an invalid roster is refused **whole** --
+the relay keeps serving the registry it had before, so everyone already
+registered carries on and the new member simply never appears. It says so once
+per edit:
 
 ```
 fexerver: warning: /var/lib/fexerver/roster.danl was not loaded (Invalid argument); the registry in force is the one before it
 ```
 
-If a registration does not seem to take, that line -- and `fexerver-roster
-list` -- is where to look first.
+If a registration does not seem to take, that line -- and `fexerver roster` --
+is where to look first.
 
 ## Backup, and what is worth backing up
 
@@ -220,7 +290,7 @@ before the socket is opened. Only an edit made to a roster that was **valid at
 boot** leaves the relay running, on the registry it already had -- and it says
 so, once, as described under *Registering members* above.
 
-**A member gets nowhere.** Check they are in `fexerver-roster list` under the
+**A member gets nowhere.** Check they are in `fexerver roster` under the
 name they use, that the card they hold is this relay's current one, and that
 their clock is inside `--window` seconds of yours: a direct peek outside the
 window is refused as a replay.

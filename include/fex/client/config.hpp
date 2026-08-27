@@ -5,7 +5,7 @@
 
 // Client layout discovery (#10.3):
 //   <root>/keys/node.dano                    the node identity
-//   <root>/keys/<relay>.relay.dano           the relay's card
+//   <root>/keys/<relay>.relay.danl           the relay's card
 //   <root>/self/<name>@<relay>/files/        the capsule: content only
 //   <root>/self/<name>@<relay>/files/inventory.danl
 //                                            the relay's inventory as last known
@@ -116,13 +116,13 @@ load_config(std::string_view root_flag, std::string_view relay_flag,
     if (!relay_flag.empty()) {
         cfg.relay_name = relay_flag;
     } else {
-        auto relays = detail::names_with_suffix(keys_dir, ".relay.dano");
+        auto relays = detail::names_with_suffix(keys_dir, ".relay.danl");
         if (relays.size() != 1) // none, or several without --relay
             return std::unexpected(std::errc::no_such_file_or_directory);
         cfg.relay_name = std::move(relays.front());
     }
     auto card = read_identity_card(
-        (keys_dir + '/' + cfg.relay_name + ".relay.dano").c_str(), true);
+        (keys_dir + '/' + cfg.relay_name + ".relay.danl").c_str(), true);
     if (!card)
         return std::unexpected(card.error());
     cfg.relay = std::move(*card);
@@ -166,8 +166,8 @@ SCENARIO("config discovery") {
     REQUIRE(fs::ensure_dirs(root + "/keys").has_value());
     REQUIRE(write_new_file((root + "/keys/node.dano").c_str(), to_dano(self),
                            identity_mode).has_value());
-    REQUIRE(write_new_file((root + "/keys/hub.relay.dano").c_str(),
-                           to_dano(card_of(relay, "127.0.0.1:4444")),
+    REQUIRE(write_new_file((root + "/keys/hub.relay.danl").c_str(),
+                           to_danl(card_of(relay, "hub", "127.0.0.1:4444")),
                            identity_card_mode).has_value());
     REQUIRE(fs::ensure_dirs(root + "/self/mine@hub/files").has_value());
 
@@ -188,8 +188,8 @@ SCENARIO("config discovery") {
     CHECK(cfg->self.pub == self.pub);
 
     // a second relay card forces --relay
-    REQUIRE(write_new_file((root + "/keys/other.relay.dano").c_str(),
-                           to_dano(card_of(generate_identity(), "127.0.0.1:5555")),
+    REQUIRE(write_new_file((root + "/keys/other.relay.danl").c_str(),
+                           to_danl(card_of(generate_identity(), "other", "127.0.0.1:5555")),
                            identity_card_mode).has_value());
     CHECK(!client::load_config(root, "", "").has_value());
     auto picked = client::load_config(root, "hub", "");

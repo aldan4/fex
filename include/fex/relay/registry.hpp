@@ -69,13 +69,14 @@ public:
             return std::unexpected(data.error());
         reg.text_.assign(reinterpret_cast<const char*>(data->data()), data->size());
         reg.hash_ = crypto::ascon::hash256(fex::bytes{*data});
-        // #6 rejects the file whole on a duplicate name or key, invalid hex or a
-        // name breaking #8, so those are not re-checked here
+        // roster::parse rejects the file whole on a duplicate name or key (#3's
+        // registry rule), invalid hex or a name breaking #8, so those are not
+        // re-checked here
         auto parsed = fex::roster::parse(reg.text_);
         if (!parsed)
             return std::unexpected(parsed.error());
         for (const auto& r : parsed->records) {
-            if (r.what != fex::roster::kind::member)
+            if (r.what() != fex::roster::kind::member)
                 continue; // a relay line grants nothing until federation lands
             member m;
             m.name = r.name;
@@ -169,8 +170,8 @@ SCENARIO("registry: the roster file is the registry") {
     const auto other = generate_identity();
 
     roster::file r;
-    r.records.push_back({roster::kind::member, "alice", alice.pub});
-    r.records.push_back({roster::kind::member, "bob", bob.pub});
+    r.records.push_back({.name = "alice", .pub = alice.pub});
+    r.records.push_back({.name = "bob", .pub = bob.pub});
     put_roster(path, r);
 
     auto reg = relay::registry::load(path);
@@ -190,7 +191,7 @@ SCENARIO("registry: the roster file is the registry") {
     CHECK(reg->hash() == crypto::ascon::hash256(fex::bytes{*on_disk}));
 
     // a relay line reaches every reader and grants nothing: no capsule, no id
-    r.records.push_back({roster::kind::relay, "r2", other.pub});
+    r.records.push_back({.name = "r2", .addr = "r2.example.net:4444", .pub = other.pub});
     put_roster(path, r);
     auto federated = relay::registry::load(path);
     REQUIRE(federated.has_value());
@@ -215,18 +216,18 @@ SCENARIO("registry: the roster file is the registry") {
     };
     const auto pub_a = to_hex(fex::bytes{alice.pub});
     const auto pub_b = to_hex(fex::bytes{bob.pub});
-    CHECK(refuses("{:kind \"member\" :name \"alice\" :pub \"" + pub_a + "\"}\n"
-                  "{:kind \"member\" :name \"alice\" :pub \"" + pub_b + "\"}\n"));
-    CHECK(refuses("{:kind \"member\" :name \"alice\" :pub \"" + pub_a + "\"}\n"
-                  "{:kind \"member\" :name \"bob\" :pub \"" + pub_a + "\"}\n"));
-    CHECK(refuses("{:kind \"member\" :name \"BAD\" :pub \"" + pub_a + "\"}\n"));
-    CHECK(refuses("{:kind \"member\" :name \"alice\"}\n"));
+    CHECK(refuses("{:kind \"id_card\" :name \"alice\" :pub \"" + pub_a + "\"}\n"
+                  "{:kind \"id_card\" :name \"alice\" :pub \"" + pub_b + "\"}\n"));
+    CHECK(refuses("{:kind \"id_card\" :name \"alice\" :pub \"" + pub_a + "\"}\n"
+                  "{:kind \"id_card\" :name \"bob\" :pub \"" + pub_a + "\"}\n"));
+    CHECK(refuses("{:kind \"id_card\" :name \"BAD\" :pub \"" + pub_a + "\"}\n"));
+    CHECK(refuses("{:kind \"id_card\" :name \"alice\"}\n"));
 
     // and a running relay keeps the registry it had rather than adopting that
     auto live = relay::registry::load(dir + "/nothing.danl");
     REQUIRE(live.has_value());
     r.records.clear();
-    r.records.push_back({roster::kind::member, "alice", alice.pub});
+    r.records.push_back({.name = "alice", .pub = alice.pub});
     put_roster(path, r);
     auto adopted = relay::registry::load(path);
     REQUIRE(adopted.has_value());
@@ -236,7 +237,7 @@ SCENARIO("registry: the roster file is the registry") {
     auto watching = relay::registry::load(path);
     REQUIRE(watching.has_value());
     CHECK(watching->size() == 1);
-    r.records.push_back({roster::kind::member, "bob", bob.pub});
+    r.records.push_back({.name = "bob", .pub = bob.pub});
     put_roster(path, r);
     const auto reloaded = watching->maybe_reload(path);
     REQUIRE(reloaded.has_value());

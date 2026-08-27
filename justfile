@@ -15,7 +15,7 @@ build:
 
 # Build debug and run the server
 run: build
-    {{bin}}
+    {{bin}} serve
 
 # Build debug and run the client
 run-client: build
@@ -42,7 +42,7 @@ build-release-host:
 
 # Build optimized (host only) and run the server
 run-release: build-release-host
-    {{bin}}
+    {{bin}} serve
 
 # Build optimized (host only) and run the client
 run-release-client: build-release-host
@@ -92,13 +92,12 @@ smoke: build-release-host
     echo "==> relay root, two client roots"
     mkdir -p "$demo/relay" "$demo/alice/keys" "$capsule/docs" "$demo/alice2/keys"
     cp "$demo/keys/relay1.dano"       "$demo/relay/node.dano"
-    # registration (#3): a line in roster.danl, which is the registry and the
-    # directory the relay publishes at once (#6)
-    pub=$(sed -n 's/.*:pub "\([0-9a-f]*\)".*/\1/p' "$demo/keys/alice.card.dano")
-    printf '{:kind "member" :name "alice" :pub "%s"}\n' "$pub" > "$demo/relay/roster.danl"
+    # registration (#3, #6): the card, appended. A card is a roster record, so
+    # there is nothing to extract and nothing to rewrite
+    cat "$demo/keys/alice.card.danl" > "$demo/relay/roster.danl"
     for root in alice alice2; do
         cp "$demo/keys/alice.dano"       "$demo/$root/keys/node.dano"
-        cp "$demo/keys/relay1.card.dano" "$demo/$root/keys/relay1.relay.dano"
+        cp "$demo/keys/relay1.card.danl" "$demo/$root/keys/relay1.relay.danl"
     done
 
     echo "==> content (a small file and a 2 MB one, so put/poll spans many chunks)"
@@ -106,7 +105,7 @@ smoke: build-release-host
     head -c 2000000 /dev/urandom > "$capsule/blob.bin"
 
     echo "==> relay on $addr"
-    {{bin}} --root "$demo/relay" --addr "$addr" > "$demo/relay.log" 2>&1 &
+    {{bin}} serve --root "$demo/relay" --addr "$addr" > "$demo/relay.log" 2>&1 &
     server=$!
     sleep 0.3
     if ! kill -0 "$server" 2>/dev/null; then
@@ -169,9 +168,11 @@ smoke: build-release-host
 
     echo "==> the relay's directory (#6): list says where it stands, get brings it"
     {{client_bin}} roster --root "$demo/alice" --name notes | tee "$demo/roster" | sed "s/^/    /"
-    grep -q "member  alice" "$demo/roster"
+    grep -q "^alice  " "$demo/roster"
     test -f "$demo/alice/peers/relay1/roster.danl"      # #10.3: under the relay it came from
-    ! grep -q ':addr' "$demo/alice/peers/relay1/roster.danl"   # identity only
+    ! grep -q ':priv' "$demo/alice/peers/relay1/roster.danl"   # cards, never identities
+    # what the relay serves is the operator's file, byte for byte: the card as sent
+    cmp "$demo/keys/alice.card.danl" "$demo/alice/peers/relay1/roster.danl"
     # asking again is a list and a local hash, not a transfer
     {{client_bin}} roster --root "$demo/alice" --name notes | grep -q "already up to date"
 

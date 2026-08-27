@@ -39,9 +39,12 @@ inline int run(const flags::args& args) {
     std::println("relay {}, {} record(s){}", cfg->relay_name,
                  got->directory.records.size(),
                  got->fetched ? "" : " (already up to date)");
+    // no role column: they are all members, bar a federate, and what says a
+    // record is a relay's is the address it answers at (#6)
     for (const auto& e : got->directory.records)
-        std::println("{:<6}  {}  {}", fex::roster::name_of(e.what), e.name,
-                     fingerprint_hex(e.pub));
+        std::println("{}  {}{}{}", e.name, fingerprint_hex(e.pub),
+                     e.addr.empty() ? std::string{} : "  " + e.addr,
+                     e.intro.empty() ? std::string{} : "  " + e.intro);
     return exit_ok;
 }
 

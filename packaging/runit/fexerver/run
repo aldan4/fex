@@ -14,5 +14,5 @@ if [ ! -f "${FEXERVER_ROOT}/node.dano" ]; then
 	exit 1
 fi
 exec chpst -u "${FEXERVER_USER}:${FEXERVER_GROUP}" \
-	/usr/bin/fexerver --root "${FEXERVER_ROOT}" --addr "${FEXERVER_ADDR}" \
+	/usr/bin/fexerver serve --root "${FEXERVER_ROOT}" --addr "${FEXERVER_ADDR}" \
 	--window "${FEXERVER_WINDOW}"

@@ -44,7 +44,7 @@ inline std::expected<client::config, int> configure(const flags::args& args) {
     if (!cfg)
         return std::unexpected(fail(
             "cannot read the client root '{}': {}\n"
-            "expected keys/node.dano and exactly one keys/<relay>.relay.dano (or "
+            "expected keys/node.dano and exactly one keys/<relay>.relay.danl (or "
             "--relay), and one self/<name>@<relay>/ capsule (or --name)",
             root.empty() ? "." : root, message(cfg.error())));
     return *cfg;
@@ -54,7 +54,7 @@ inline std::expected<client::config, int> configure(const flags::args& args) {
 inline constexpr std::string_view relay_options =
     "  -r, --root <path>       client root (default: $FEX_ROOT, then current);\n"
     "                          holds keys/ and self/\n"
-    "      --relay <name>      relay to use when keys/ has several *.relay.dano\n"
+    "      --relay <name>      relay to use when keys/ has several *.relay.danl\n"
     "      --name <name>       capsule name when self/ does not pin one\n";
 
 } // namespace fex::commands
