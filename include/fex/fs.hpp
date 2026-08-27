@@ -52,11 +52,9 @@ struct info {
     u64 mtime_ns;
 }; // info
 
-// lstat: symlinks are reported as `other`, never followed
-[[nodiscard]] inline info stat_of(const char* path) noexcept {
-    struct ::stat st;
-    if (::lstat(path, &st) != 0)
-        return {entry_kind::missing, 0, 0};
+namespace detail {
+
+[[nodiscard]] inline info info_of(const struct ::stat& st) noexcept {
     const auto kind = S_ISREG(st.st_mode) ? entry_kind::file
                     : S_ISDIR(st.st_mode) ? entry_kind::dir
                                           : entry_kind::other;
@@ -68,6 +66,30 @@ struct info {
                        + u64(st.st_mtim.tv_nsec);
 #endif
     return {kind, u64(st.st_size), mtime_ns};
+}
+
+} // namespace detail
+
+// lstat: symlinks are reported as `other`, never followed. A path this cannot
+// look at reads the same as a path with nothing on it, which is the right answer
+// where absence is the only interesting failure.
+[[nodiscard]] inline info stat_of(const char* path) noexcept {
+    struct ::stat st;
+    if (::lstat(path, &st) != 0)
+        return {entry_kind::missing, 0, 0};
+    return detail::info_of(st);
+}
+
+// And the other answer, for where being unable to look must be told apart from
+// having looked: a registry the relay cannot read is not an empty registry.
+// `missing` only for ENOENT; every other errno comes back as itself.
+[[nodiscard]] inline std::expected<info, std::errc> stat_or_error(const char* path) noexcept {
+    struct ::stat st;
+    if (::lstat(path, &st) == 0)
+        return detail::info_of(st);
+    if (errno == ENOENT)
+        return info{entry_kind::missing, 0, 0};
+    return failure();
 }
 
 [[nodiscard]] inline std::expected<std::vector<u8>, std::errc>

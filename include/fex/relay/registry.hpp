@@ -57,9 +57,13 @@ public:
     [[nodiscard]] static std::expected<registry, std::errc>
     load(const std::string& path) noexcept {
         registry reg;
-        const auto st = fs::stat_of(path.c_str());
-        reg.mtime_ns_ = st.mtime_ns;
-        if (st.kind == fs::entry_kind::missing) {
+        // #3: a relay that cannot read its registry does not start, so anything
+        // but ENOENT is that error rather than an empty registry
+        const auto st = fs::stat_or_error(path.c_str());
+        if (!st)
+            return std::unexpected(st.error());
+        reg.mtime_ns_ = st->mtime_ns;
+        if (st->kind == fs::entry_kind::missing) {
             // a relay nobody is registered on yet: empty, and able to say so
             reg.hash_ = crypto::ascon::hash256({});
             return reg;
@@ -139,6 +143,7 @@ public:
 #ifdef FEX_WITH_TESTS
 
 #include <cstdlib>
+#include <sys/stat.h>
 #include <unistd.h>
 
 TEST_SUITE("fex::relay") {
@@ -222,6 +227,21 @@ SCENARIO("registry: the roster file is the registry") {
                   "{:kind \"id_card\" :name \"bob\" :pub \"" + pub_a + "\"}\n"));
     CHECK(refuses("{:kind \"id_card\" :name \"BAD\" :pub \"" + pub_a + "\"}\n"));
     CHECK(refuses("{:kind \"id_card\" :name \"alice\"}\n"));
+
+    // #3: a registry it cannot read is not an empty registry. Only the relay ever
+    // writes this file, and it may run as a user the operator is not, so "the
+    // permissions shut me out" must not read as "nobody is registered"
+    if (::geteuid() != 0) { // root walks through a chmod, so it cannot see this
+        r.records.clear();
+        r.records.push_back(roster::member_record("alice", alice.pub));
+        put_roster(path, r);
+        REQUIRE(::chmod(path.c_str(), 0) == 0);
+        const auto blind = relay::registry::load(path);
+        REQUIRE_FALSE(blind.has_value());
+        CHECK(blind.error() == std::errc::permission_denied);
+        REQUIRE(::chmod(path.c_str(), 0644) == 0);
+        CHECK(relay::registry::load(path)->size() == 1);
+    }
 
     // and a running relay keeps the registry it had rather than adopting that
     auto live = relay::registry::load(dir + "/nothing.danl");

@@ -10,6 +10,7 @@ members needs nothing from here: `fexerver include` and `fexerver exclude` are
 commands of the relay itself.
 
 ```
+install.sh                     the whole setup, in one command
 systemd/fexerver.service       systemd unit
 systemd/fexerver.sysusers      sysusers.d fragment for the service user
 openrc/fexerver.initd          OpenRC service (Alpine and friends)
@@ -36,7 +37,35 @@ runit/fexerver/                runit service directory (Void)
 - **Entropy**, through `getrandom(2)`. Nothing else: no DNS, no outbound
   connections, no writable `/tmp`, one thread, one socket.
 
-## Install, on any of the three
+## Install, in one command
+
+On the server, with the two binaries beside you (built there, or copied over --
+see *Cross-compiling* below):
+
+```sh
+doas ./packaging/install.sh --addr relay.example.net:4444      # sudo, elsewhere
+```
+
+That is the whole of what the rest of this section spells out: it creates the
+service user, installs `fexerver` and `fex`, makes the relay root, generates the
+identity if there is none, and installs the service file for whichever init the
+machine runs -- systemd, OpenRC or runit, detected rather than asked about. Then
+it prints the three things left to do: hand out the relay's card, register a
+member, start the service.
+
+It is safe to run again: anything already in place is left alone, and an
+identity that exists is **never** overwritten -- that file is the relay, and a
+second one would leave every member holding a card for a node that is gone.
+`--dry-run` prints what it would do and changes nothing; `--root`, `--user`,
+`--bin-dir` and `--from` override the defaults.
+
+`--addr` is the address **members** will dial -- your public one, not the bind
+address. It is what goes in the relay's card.
+
+The rest of this section is the same work done by hand, for a machine that wants
+something other than the defaults.
+
+## Install, step by step
 
 Build one binary for all of Linux. zig links musl statically, so the result
 depends on no libc at all and runs on Alpine, Void, Debian and everything else
@@ -113,6 +142,52 @@ rm -f /tmp/relay1.dano                # the copy outside the root is not wanted
 Compare the fingerprint printed by `generate` with your members over some
 independent channel before they trust the card.
 
+## Cross-compiling, and copying it over
+
+The server does not have to build anything. zig cross-compiles, and a musl build
+is static, so what lands there is two files and no toolchain, no runtime, no
+package to install. That is worth doing when the box is small (a 1 GB VPS has a
+thin time linking a C++ binary), when you would rather not leave 300 MB of
+compiler on a machine that faces the network, or when you want the same bytes on
+several relays.
+
+Build for the server's architecture:
+
+```sh
+just build-release-musl                       # x86_64, into zig-out/x86_64-linux-musl/bin
+# an ARM board:
+zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-musl --prefix zig-out/aarch64-linux-musl
+```
+
+Copy and install. The trailing **`:`** is what makes the destination remote --
+without it scp writes a local file named after your server and says `No such
+file or directory`:
+
+```sh
+scp -P 22222 zig-out/x86_64-linux-musl/bin/{fexerver,fex} ortfero@relay.example.net:
+
+# on the server -- doas on Alpine, sudo elsewhere
+doas install -m 0755 ~/fexerver /usr/bin/fexerver
+doas install -m 0755 ~/fex      /usr/bin/fex
+```
+
+Check that what arrived is what you built, and that it is the build you think it
+is:
+
+```sh
+sha256sum /usr/bin/fexerver     # against shasum -a 256 on the build machine
+fexerver help | head -12        # a current build lists serve/include/exclude/roster
+```
+
+`fexerver version` prints the protocol version, which does not move between
+builds -- so the `help` output, not the version, is what tells a stale binary
+from a fresh one.
+
+Installing over a running relay is safe: the running process keeps the old
+inode and carries on. The new binary takes effect when you restart it --
+`systemctl restart fexerver`, `rc-service fexerver restart`, `sv restart
+fexerver` -- and *Upgrading* below says what that costs.
+
 ## Paths and access rights
 
 Everything the relay owns lives under one directory, and one system user owns
@@ -145,25 +220,33 @@ repaired.
 
 `roster.danl` is public by design -- it is what the relay serves to its
 members -- so `0644` is right, and it is the one file you edit. Run
-`fexerver include`/`exclude` either as the service user or as root:
+`fexerver include`/`exclude` **as root**:
 
 ```sh
-sudo -u fexerver fexerver include alice.card.danl --root /var/lib/fexerver
+doas fexerver include alice.card.danl --root /var/lib/fexerver     # sudo, elsewhere
 ```
 
-Run as root, the rewritten file ends up `root:root 0644`, which the relay reads
-perfectly well -- it never writes that file, only reads it and serves its bytes.
-Run as the service user, it stays `fexerver:fexerver`. Either is fine; what is
-not fine is a root directory the service user cannot write, since the relay
+The rewritten file ends up `root:root 0644`, which the relay reads perfectly
+well: it never writes that file, only reads it and serves its bytes.
+
+Do not reach for the service user to do it. `sudo -u fexerver` needs a sudoers
+entry you probably have not written, and `su fexerver` cannot work at all --
+that account is deliberately locked, with no password and `nologin` for a shell,
+which is most of what makes it a service user. Root is the shorter road and
+costs nothing here.
+
+What is not fine is a relay root the service user cannot write: the relay
 creates `objects/` and `capsules/` itself and stages every upload inside them.
 
 To check a root over:
 
 ```sh
-sudo -u fexerver test -w /var/lib/fexerver && echo "writable by the service"
-sudo -u fexerver test -r /var/lib/fexerver/node.dano && echo "identity readable"
-stat -c '%U:%G %a %n' /var/lib/fexerver /var/lib/fexerver/node.dano
+stat -c '%U:%G %a %n' /var/lib/fexerver /var/lib/fexerver/node.dano /var/lib/fexerver/roster.danl
+doas fexerver roster --root /var/lib/fexerver     # reads what the relay reads
 ```
+
+The relay itself is the better check than any permission probe: if it starts and
+says how many members it has, everything it needs is readable.
 
 ## systemd
 
@@ -233,13 +316,9 @@ writes the whole file at once, so a relay reading it mid-change reads one state
 or the other. `exclude` takes the line out and leaves `capsules/<name>/` alone:
 what a member published is theirs.
 
-Run them as the service user, or as root -- the file is rewritten in place with
-the ownership it had:
-
-```sh
-install -d -o fexerver -g fexerver -m 0750 /var/lib/fexerver
-sudo -u fexerver fexerver include alice.card.danl --root /var/lib/fexerver
-```
+Run them as root -- `doas` on Alpine, `sudo` elsewhere. Not as the service user:
+that account is locked on purpose, so `su fexerver` will only tell you the
+password is wrong.
 
 The name the member goes by here is the `:name` in their card. Renaming someone
 is editing that field in the line; the key is what the relay goes by.
@@ -293,15 +372,50 @@ cost is the address cache: every member re-peeks before their next request.
 
 ## Firewall
 
+One rule: **UDP 4444, inbound**. The relay never initiates a connection, so
+nothing outbound needs opening, and no TCP port belongs to it at all.
+
+### ufw
+
+```sh
+ufw allow 4444/udp
+ufw status verbose
+```
+
+**Before `ufw enable` on a machine you reach over ssh, allow ssh first** --
+including a port you have moved it to, which ufw knows nothing about:
+
+```sh
+ufw allow 22/tcp            # or: ufw allow 22222/tcp, if that is where yours is
+ufw enable                  # only now
+```
+
+Enabling ufw with a default-deny policy and no ssh rule locks you out of a
+remote box, and getting back in means the provider's serial console. To narrow
+the relay's rule to the members you know, or to undo it:
+
+```sh
+ufw allow from 203.0.113.0/24 to any port 4444 proto udp
+ufw delete allow 4444/udp
+```
+
+### nftables, iptables, awall
+
 ```sh
 # nftables
 nft add rule inet filter input udp dport 4444 accept
+
 # iptables
 iptables -A INPUT -p udp --dport 4444 -j ACCEPT
-# Alpine awall, Void iptables-restore: the same one rule
+
+# Alpine awall: a policy file, the same one rule
+#   {"filter": [{"in": "internet", "service": "fex", "action": "accept"}],
+#    "service": {"fex": [{"proto": "udp", "port": 4444}]}}
 ```
 
-UDP only, one port, inbound. The relay never initiates a connection.
+If you moved the relay off 4444 with `--addr`, open that port instead -- and
+remember the port in the relay's card is the one members dial, so the two have
+to agree.
 
 ## Troubleshooting
 

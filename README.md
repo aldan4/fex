@@ -101,29 +101,25 @@ For a relay that outlives your shell, see below and then
 ## Running it as a service
 
 `fexerver serve` stays in the foreground, says one line, writes only under its
-`--root` and stops on `SIGTERM`, so any supervisor can run it as it is. The
-files are in [packaging/](packaging):
+`--root` and stops on `SIGTERM`, so any supervisor can run it as it is. On the
+server, with the binaries beside you:
 
 ```sh
-# systemd
-install -m 0644 packaging/systemd/fexerver.service /etc/systemd/system/
-systemctl daemon-reload && systemctl enable --now fexerver
-
-# OpenRC (Alpine)
-install -m 0755 packaging/openrc/fexerver.initd /etc/init.d/fexerver
-install -m 0644 packaging/openrc/fexerver.confd /etc/conf.d/fexerver
-rc-update add fexerver default && rc-service fexerver start
-
-# runit (Void)
-cp -r packaging/runit/fexerver /etc/sv/fexerver
-ln -s /etc/sv/fexerver /var/service/
+doas ./packaging/install.sh --addr relay.example.net:4444      # sudo, elsewhere
 ```
+
+That makes the service user, installs the binaries and the relay root, generates
+the identity if there is none, and installs the service file for whichever init
+the machine runs -- systemd, OpenRC or runit. It is safe to run twice and never
+overwrites an identity. The units it installs are in
+[packaging/](packaging) if you would rather place them yourself.
 
 All three run `/usr/bin/fexerver serve` on `/var/lib/fexerver` as a `fexerver`
 user. The operator's guide, **[packaging/README.md](packaging/README.md)**, has
 the rest: the service user, the relay's identity, which path is owned by whom
-and in what mode, registration, backups, the firewall rule, and what the startup
-failures mean.
+and in what mode, cross-compiling and copying the binaries to a server that
+builds nothing itself, registration, backups, the firewall rule, and what the
+startup failures mean.
 
 ## Using a client
 

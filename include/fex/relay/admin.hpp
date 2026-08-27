@@ -58,12 +58,16 @@ record_count(std::string_view text) noexcept {
 [[nodiscard]] inline std::expected<roster::file, std::errc>
 load(std::string_view root) noexcept {
     const auto path = roster_path(root);
-    const auto st = fs::stat_of(path.c_str());
-    if (st.kind == fs::entry_kind::missing)
-        return roster::file{}; // a relay nobody is on yet
+    // A roster that is not there is a relay nobody is on yet. A roster that
+    // cannot be read is an error, and must not come back as an empty one: a root
+    // whose permissions shut you out would otherwise answer "nobody is
+    // registered" over a registry that is perfectly intact.
     auto data = fs::read_file(path.c_str());
-    if (!data)
+    if (!data) {
+        if (data.error() == std::errc::no_such_file_or_directory)
+            return roster::file{};
         return std::unexpected(data.error());
+    }
     const std::string_view text{reinterpret_cast<const char*>(data->data()), data->size()};
     auto parsed = roster::parse(text);
     if (!parsed)
@@ -135,6 +139,7 @@ list(std::string_view root) noexcept {
 #ifdef FEX_WITH_TESTS
 
 #include <cstdlib>
+#include <sys/stat.h>
 #include <unistd.h>
 
 TEST_SUITE("fex::relay::admin") {
@@ -198,6 +203,20 @@ SCENARIO("include and exclude are the registry, and the card is the line") {
     CHECK(reg->records[0].name == "bob");
     CHECK(relay::admin::exclude(root, "alice").error()
           == std::errc::no_such_file_or_directory);
+
+    // a root that shuts the reader out is an error, not an empty registry: the
+    // whole tree is tested as one user who owns everything in it, so this is the
+    // one case a smoke run cannot stumble into by itself
+    if (::geteuid() != 0) { // root would walk straight through the chmod
+        REQUIRE(::chmod(root.c_str(), 0) == 0);
+        const auto blind = relay::admin::list(root);
+        REQUIRE_FALSE(blind.has_value());
+        CHECK(blind.error() == std::errc::permission_denied);
+        CHECK_FALSE(relay::admin::include(root, alice_path.c_str()).has_value());
+        CHECK_FALSE(relay::admin::exclude(root, "bob").has_value());
+        REQUIRE(::chmod(root.c_str(), 0755) == 0);
+        CHECK(relay::admin::list(root)->records.size() == 1); // and it was there all along
+    }
 
     // a roster carrying a record this build does not know is left alone rather
     // than rewritten without it (#6)

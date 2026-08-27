@@ -26,25 +26,29 @@ run-client: build
 # Both platforms are built explicitly, so neither depends on which one is the host.
 # Whichever is not the host also compile-checks that platform's poller backend:
 # epoll on Linux, kqueue on macOS. Its binaries cannot be run here.
+#
+# The Linux half is the musl build, because that is the one that gets deployed:
+# zig links musl statically, so it depends on no libc, runs on Alpine and on a
+# glibc distro alike, and is the pair that `scp` carries to a server. It
+# compile-checks epoll exactly as a gnu build would.
 
-# Optimized builds for macOS and Linux
-build-release: build-release-macos build-release-linux
+# Optimized builds for macOS and Linux -- the two that get shipped
+build-release: build-release-macos build-release-musl
 
 # Optimized build for macOS, into {{macos_out}}/bin
 build-release-macos:
     zig build -Doptimize=ReleaseFast -Dtarget={{macos_target}} --prefix {{macos_out}}
 
-# Optimized build for Linux, into {{linux_out}}/bin
-build-release-linux:
-    zig build -Doptimize=ReleaseFast -Dtarget={{linux_target}} --prefix {{linux_out}}
-
-# Optimized build for Alpine and other musl distros, into {{musl_out}}/bin.
-# zig links musl statically, so this one depends on no libc and runs on a glibc
-# distro as well; a {{linux_target}} build does not run on Alpine at all.
-
 # Optimized, statically linked build for musl, into {{musl_out}}/bin
 build-release-musl:
     zig build -Doptimize=ReleaseFast -Dtarget={{musl_target}} --prefix {{musl_out}}
+
+# And the glibc build, for a distro whose libc updates you would rather inherit
+# than rebuild for; it does not run on Alpine at all
+
+# Optimized build for glibc Linux, into {{linux_out}}/bin
+build-release-linux:
+    zig build -Doptimize=ReleaseFast -Dtarget={{linux_target}} --prefix {{linux_out}}
 
 # Optimized build for the host, into zig-out/bin (this is the one you can run)
 build-release-host:
