@@ -3,7 +3,7 @@
 
 #pragma once
 
-// Client layout discovery (#10.3):
+// Client layout discovery (#10.3), under the root resolve_root finds:
 //   <root>/keys/node.dano                    the node identity
 //   <root>/keys/<relay>.relay.danl           the relay's card
 //   <root>/self/<name>@<relay>/files/        the capsule: content only
@@ -90,22 +90,44 @@ names_with_suffix(const std::string& dir, std::string_view suffix) noexcept {
 
 } // namespace detail
 
-// root: the flag, else $FEX_ROOT, else the current directory. The relay is
-// picked by --relay when several cards exist; the capsule name by --name when
-// self/ does not already hold exactly one <name>@<relay> folder.
+// The rule behind resolve_root, with everything it looks at handed in: the flag,
+// else $FEX_ROOT, else the current directory when it is a client root already,
+// else ~/fex -- so a command run from anywhere finds the one root most people
+// have, and one run inside a root uses that root.
+[[nodiscard]] inline std::string
+choose_root(std::string_view flag, const char* env, bool cwd_is_root, const char* home) {
+    std::string root;
+    if (!flag.empty())
+        root = flag;
+    else if (env != nullptr && *env != '\0')
+        root = env;
+    else if (cwd_is_root || home == nullptr || *home == '\0')
+        root = ".";
+    else {
+        root = home;
+        while (!root.empty() && root.back() == '/')
+            root.pop_back();
+        root += "/fex";
+    }
+    while (root.size() > 1 && root.back() == '/')
+        root.pop_back();
+    return root;
+}
+
+[[nodiscard]] inline std::string resolve_root(std::string_view flag) {
+    return choose_root(flag, std::getenv("FEX_ROOT"),
+                       fs::stat_of("keys/node.dano").kind == fs::entry_kind::file,
+                       std::getenv("HOME"));
+}
+
+// root: see resolve_root. The relay is picked by --relay when several cards
+// exist; the capsule name by --name when self/ does not already hold exactly one
+// <name>@<relay> folder.
 [[nodiscard]] inline std::expected<config, std::errc>
 load_config(std::string_view root_flag, std::string_view relay_flag,
             std::string_view name_flag) noexcept {
     config cfg;
-    if (!root_flag.empty()) {
-        cfg.root = root_flag;
-    } else if (const char* env = std::getenv("FEX_ROOT"); env != nullptr && *env != '\0') {
-        cfg.root = env;
-    } else {
-        cfg.root = ".";
-    }
-    while (cfg.root.size() > 1 && cfg.root.back() == '/')
-        cfg.root.pop_back();
+    cfg.root = resolve_root(root_flag);
 
     auto self = read_identity((cfg.root + "/keys/node.dano").c_str());
     if (!self)
@@ -202,6 +224,18 @@ SCENARIO("config discovery") {
     CHECK(named->files_dir == root + "/self/fresh@hub/files");
 
     REQUIRE(fs::remove_tree(root).has_value());
+}
+
+SCENARIO("the client root: flag, environment, current directory, home") {
+    using fex::client::choose_root;
+    CHECK(choose_root("mine/", "/env", true, "/home/a") == "mine");
+    CHECK(choose_root("", "/env/", true, "/home/a") == "/env");
+    CHECK(choose_root("", "", true, "/home/a") == ".");
+    CHECK(choose_root("", nullptr, false, "/home/a") == "/home/a/fex");
+    CHECK(choose_root("", nullptr, false, "/home/a/") == "/home/a/fex");
+    CHECK(choose_root("", nullptr, false, "/") == "/fex");
+    CHECK(choose_root("", nullptr, false, nullptr) == ".");
+    CHECK(choose_root("/", nullptr, false, nullptr) == "/");
 }
 
 }

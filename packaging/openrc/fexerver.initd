@@ -34,7 +34,8 @@ depend() {
 }
 
 start_pre() {
-	checkpath -d -m 0750 -o "${FEXERVER_USER}:${FEXERVER_GROUP}" "${FEXERVER_ROOT}" || return 1
+	# 0770: the operators in the service group manage the roster in it
+	checkpath -d -m 0770 -o "${FEXERVER_USER}:${FEXERVER_GROUP}" "${FEXERVER_ROOT}" || return 1
 	checkpath -f -m 0640 -o "${FEXERVER_USER}:${FEXERVER_GROUP}" "${FEXERVER_LOG}" || return 1
 	if [ ! -f "${FEXERVER_ROOT}/node.dano" ]; then
 		eerror "no relay identity at ${FEXERVER_ROOT}/node.dano"

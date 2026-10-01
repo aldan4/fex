@@ -47,17 +47,25 @@ doas ./packaging/install.sh --addr relay.example.net:4444      # sudo, elsewhere
 ```
 
 That is the whole of what the rest of this section spells out: it creates the
-service user, installs `fexerver` and `fex`, makes the relay root, generates the
-identity if there is none, and installs the service file for whichever init the
-machine runs -- systemd, OpenRC or runit, detected rather than asked about. Then
-it prints the three things left to do: hand out the relay's card, register a
-member, start the service.
+service user, puts you -- whoever ran `doas` or `sudo` -- in its group, installs
+`fexerver` and `fex`, makes the relay root, generates the identity if there is
+none, and installs the service file for whichever init the machine runs --
+systemd, OpenRC or runit, detected rather than asked about. Then it prints what
+is left to do: start the service, log in again, hand out the relay's card,
+register a member.
+
+That is the only `doas` there is. Every file is made by the user who is to own
+it -- the identity is generated *as* the service user, straight into the root --
+so nothing is handed over with a `chown`, then or later; and from your next
+login the group lets you manage members as yourself (*Registering members*
+below).
 
 It is safe to run again: anything already in place is left alone, and an
 identity that exists is **never** overwritten -- that file is the relay, and a
 second one would leave every member holding a card for a node that is gone.
-`--dry-run` prints what it would do and changes nothing; `--root`, `--user`,
-`--bin-dir` and `--from` override the defaults.
+`--dry-run` prints what it would do and changes nothing; `--name` (the relay's
+name, `relay1` by default), `--root`, `--user`, `--operator`, `--bin-dir` and
+`--from` override the defaults.
 
 `--addr` is the address **members** will dial -- your public one, not the bind
 address. It is what goes in the relay's card.
@@ -126,21 +134,30 @@ useradd --system --no-create-home --home-dir /var/lib/fexerver \
         --shell /usr/bin/nologin --user-group fexerver
 ```
 
-Lay out the root and give the relay an identity. `--addr` is what makes the
+Put yourself in its group, so that managing members later needs no `doas`. It
+counts from your next login:
+
+```sh
+usermod -aG fexerver ortfero          # Alpine without shadow: addgroup ortfero fexerver
+```
+
+Lay out the root and give the relay an identity, generated **as the service
+user** so that it is born with the owner it needs. `--addr` is what makes the
 generated card a relay's card -- it is the address **members** will dial, so it
 must be the public one, not the bind address:
 
 ```sh
-install -d -o fexerver -g fexerver -m 0750 /var/lib/fexerver
+install -d -o fexerver -g fexerver -m 0770 /var/lib/fexerver
 
-fex generate relay1 --dir /tmp --addr relay.example.net:4444 --intro "home relay"
-install -o fexerver -g fexerver -m 0600 /tmp/relay1.dano /var/lib/fexerver/node.dano
-rm -f /tmp/relay1.dano                # the copy outside the root is not wanted
-# /tmp/relay1.card.danl is the public half: that is what you hand to members
+su -s /bin/sh -c 'fex generate relay1 --dir /var/lib/fexerver \
+    --addr relay.example.net:4444 --intro "home relay"' fexerver
+mv /var/lib/fexerver/relay1.dano /var/lib/fexerver/node.dano
+# relay1.card.danl, beside it, is the public half: that is what you hand to members
 ```
 
-Compare the fingerprint printed by `generate` with your members over some
-independent channel before they trust the card.
+`su -s /bin/sh` is what runs a command as an account whose own shell is
+`nologin`. Compare the fingerprint printed by `generate` with your members over
+some independent channel before they trust the card.
 
 ## Cross-compiling, and copying it over
 
@@ -190,60 +207,68 @@ fexerver` -- and *Upgrading* below says what that costs.
 
 ## Paths and access rights
 
-Everything the relay owns lives under one directory, and one system user owns
-that directory. Nothing else needs write access to anything.
+Everything the relay owns lives under one directory, which the service user owns
+and its group may write. The rule that keeps `chown` out of all of it: **every
+file is created by the user who is to own it**, so ownership is never repaired
+after the fact.
 
 | path | owner | mode | who makes it |
 |---|---|---|---|
 | `/usr/bin/fexerver` | `root:root` | `0755` | you, from the build |
-| `/var/lib/fexerver` | `fexerver:fexerver` | `0750` | you, or `StateDirectory=` |
-| `/var/lib/fexerver/node.dano` | `fexerver:fexerver` | `0600` | you, from `fex generate` |
-| `/var/lib/fexerver/roster.danl` | any, readable by the service | `0644` | `fexerver include` |
+| `/var/lib/fexerver` | `fexerver:fexerver` | `0770` | `install.sh`, or the service at start |
+| `/var/lib/fexerver/node.dano` | `fexerver:fexerver` | `0600` | `fex generate`, run as `fexerver` |
+| `/var/lib/fexerver/<relay>.card.danl` | `fexerver:fexerver` | `0644` | the same `fex generate` |
+| `/var/lib/fexerver/roster.danl` | whoever ran `include` last | `0644` | `fexerver include`, as you |
 | `/var/lib/fexerver/objects/` | `fexerver:fexerver` | umask | the relay, at first start |
 | `/var/lib/fexerver/capsules/` | `fexerver:fexerver` | umask | the relay, at first start |
 | `/var/log/fexerver.log` (OpenRC) | `fexerver:fexerver` | `0640` | `start_pre` |
 | `/var/log/fexerver/` (runit) | `_log:_log` | `0750` | `log/run` |
+
+The root is made by whichever supervisor runs the relay -- `StateDirectory=`
+under systemd, `checkpath` in the OpenRC `start_pre`, the runit `run` script --
+and by `install.sh` before any of them, so it is right whichever comes first.
 
 What the relay makes for itself it makes `0755` and `0644`, filtered through the
 service umask: under the shipped systemd unit, which sets `UMask=0077`, that
 lands as `0700` and `0600`; under the OpenRC and runit scripts it follows
 whatever umask the supervisor was started with, usually `0022`.
 
-Either way the mode that matters is the root's. `0750` on `/var/lib/fexerver`
-means no other user can traverse into it, so what the files inside say is moot
--- an `ls -l` showing `-rw-r--r--` on an object is not a leak. Tighten the root,
-not the files under it.
+Either way the mode that matters is the root's. `0770` on `/var/lib/fexerver`
+lets in the service user and the operators in its group, and nobody else can
+traverse into it, so what the files inside say is moot -- an `ls -l` showing
+`-rw-r--r--` on an object is not a leak. Tighten the root, not the files under
+it.
 
 `node.dano` is the exception that does not depend on any of this: it is written
-`0600` outright, whatever the umask, and it is the one file whose loss cannot be
-repaired.
+`0600` outright, whatever the umask, so even an operator in the group cannot
+read it -- and it is the one file whose loss cannot be repaired.
 
 `roster.danl` is public by design -- it is what the relay serves to its
-members -- so `0644` is right, and it is the one file you edit. Run
-`fexerver include`/`exclude` **as root**:
+members -- so `0644` is right, and it is the one file you edit. `include` and
+`exclude` replace it whole, by a rename inside the root, which is why they need
+the group's write access to the directory and nothing else. Who ends up owning
+the file does not matter: the relay never writes it, only reads it and serves
+its bytes.
 
-```sh
-doas fexerver include alice.card.danl --root /var/lib/fexerver     # sudo, elsewhere
-```
-
-The rewritten file ends up `root:root 0644`, which the relay reads perfectly
-well: it never writes that file, only reads it and serves its bytes.
-
-Do not reach for the service user to do it. `sudo -u fexerver` needs a sudoers
-entry you probably have not written, and `su fexerver` cannot work at all --
-that account is deliberately locked, with no password and `nologin` for a shell,
-which is most of what makes it a service user. Root is the shorter road and
-costs nothing here.
-
-What is not fine is a relay root the service user cannot write: the relay
-creates `objects/` and `capsules/` itself and stages every upload inside them.
+The one thing that is not fine is a relay root the service user cannot write:
+the relay creates `objects/` and `capsules/` itself and stages every upload
+inside them. So the relay refuses to serve a root that belongs to anyone but
+the user running it -- a `fexerver serve` tried by hand as you or as root says
+`cannot start: serving /var/lib/fexerver, which belongs to another user`
+instead of leaving behind directories the service could no longer write. Run it
+as the service, or as `su -s /bin/sh -c 'fexerver serve' fexerver`.
 
 To check a root over:
 
 ```sh
 stat -c '%U:%G %a %n' /var/lib/fexerver /var/lib/fexerver/node.dano /var/lib/fexerver/roster.danl
-doas fexerver roster --root /var/lib/fexerver     # reads what the relay reads
+fexerver roster                   # reads what the relay reads
 ```
+
+An install from before the group existed has a `0750` root and a roster owned
+by `root`. Running `install.sh` again brings the root to `0770` and adds you to
+the group; the old roster needs nothing, since it is replaced rather than
+written in place.
 
 The relay itself is the better check than any permission probe: if it starts and
 says how many members it has, everything it needs is readable.
@@ -258,10 +283,11 @@ systemctl status fexerver
 journalctl -u fexerver
 ```
 
-`StateDirectory=fexerver` creates and owns `/var/lib/fexerver`, so the
-`install -d` above is only needed if you put the root elsewhere -- in which case
-change `--root` and add `ReadWritePaths=` for it. Change settings with a
-drop-in rather than by editing the unit:
+`StateDirectory=fexerver` creates and owns `/var/lib/fexerver`, mode `0770`, so
+the `install -d` above is only needed if you put the root elsewhere -- in which
+case change `--root`, add `ReadWritePaths=` for it, and set `FEXERVER_ROOT` in
+your shell so the commands find it too. Change settings with a drop-in rather
+than by editing the unit:
 
 ```sh
 systemctl edit fexerver     # [Service] / ExecStart= / ExecStart=/usr/bin/fexerver serve --root ...
@@ -295,7 +321,8 @@ sv status fexerver
 tail -f /var/log/fexerver/current
 ```
 
-`/etc/sv/fexerver/conf` holds the settings; `log/run` runs `svlogd -tt` as
+`/etc/sv/fexerver/conf` holds the settings; `run` makes the root, `0770`, before
+it starts the relay; `log/run` runs `svlogd -tt` as
 `_log`, so output is rotated in `/var/log/fexerver/`. `sv stop fexerver` sends
 `SIGTERM`, which is the clean stop.
 
@@ -304,29 +331,52 @@ tail -f /var/log/fexerver/current
 The roster is the registry and the published directory at once, and every line
 is a card -- so registering someone is their card added to it:
 
+The member runs `fex generate alice` on their machine and sends you
+`alice.card.danl` -- the public half, one line. Registering it is one command
+from **your** machine, with nothing copied onto the relay's:
+
 ```sh
-fexerver include /path/to/alice.card.danl --root /var/lib/fexerver
-fexerver roster --root /var/lib/fexerver
-fexerver exclude alice --root /var/lib/fexerver
+ssh relay.example.net fexerver include < alice.card.danl
 ```
+
+`include` with no file reads the card from stdin. Logged in on the relay, the
+same and its neighbours are:
+
+```sh
+fexerver include alice.card.danl
+fexerver roster
+fexerver exclude alice
+```
+
+Run them as yourself: no `doas`, no `--root`, no `chown`. Membership of the
+`fexerver` group is what lets you write the root (`install.sh` arranges it, and
+it counts from your next login), and `/var/lib/fexerver` is where the commands
+look when you do not say otherwise -- `--root`, then `$FEXERVER_ROOT`, then the
+current directory if it holds a `node.dano`, then `/var/lib/fexerver`. A relay
+kept elsewhere wants `export FEXERVER_ROOT=/srv/fex` in your profile, after
+which it is the same commands.
+
+Not as the service user: that account is locked on purpose, so `su fexerver`
+will only tell you the password is wrong. And not as root unless you must: it
+works, but it is the habit this layout exists to make unnecessary.
 
 `include` writes the card's line and nothing else, refusing a name or a key
 already registered (#3) and an identity file handed over in a card's place. It
 writes the whole file at once, so a relay reading it mid-change reads one state
 or the other. `exclude` takes the line out and leaves `capsules/<name>/` alone:
-what a member published is theirs.
-
-Run them as root -- `doas` on Alpine, `sudo` elsewhere. Not as the service user:
-that account is locked on purpose, so `su fexerver` will only tell you the
-password is wrong.
+what a member published is theirs; delete it yourself if that is what you mean.
 
 The name the member goes by here is the `:name` in their card. Renaming someone
 is editing that field in the line; the key is what the relay goes by.
 
 The relay picks the change up on the next request it serves, and rereads the
 file at most once a second -- adding or removing a member needs no restart and
-no signal. `remove` takes the member out of the registry but leaves
-`capsules/<name>/` on disk; delete it yourself if that is what you mean.
+no signal.
+
+The relay's own card goes the other way, once per member: they save it as
+`keys/<relay>.relay.danl` in their client root. It sits beside the identity,
+readable through the group, so `scp relay.example.net:/var/lib/fexerver/relay1.card.danl .`
+fetches it without anyone's help.
 
 Hand-editing works too -- `cat alice.card.danl >> roster.danl` is the same
 registration -- and the commands only save you from the ways that goes wrong: a
@@ -432,7 +482,16 @@ reports a failed start rather than a relay that is up and serving nobody:
 fexerver: cannot start: loading the roster /var/lib/fexerver/roster.danl: Invalid argument
 fexerver: cannot start: reading the identity /var/lib/fexerver/node.dano: No such file or directory
 fexerver: cannot start: binding 0.0.0.0:4444: Address already in use
+fexerver: cannot start: serving /var/lib/fexerver, which belongs to another user: Operation not permitted
 ```
+
+The last one is a relay started as the wrong user -- by hand as yourself or as
+root, or by a unit edited to another `User=`. It is refused before anything is
+created, so there is nothing to clean up: start it as the service user.
+
+**`include` says `Permission denied`.** Your session predates your membership
+of the group: `id` will not list `fexerver`. Log out and in again (a fresh
+`ssh` is enough).
 
 An invalid roster is a refusal to start, not a warning -- the registry is read
 before the socket is opened. Only an edit made to a roster that was **valid at

@@ -21,9 +21,10 @@ Type=exec
 User=fexerver
 Group=fexerver
 # creates and owns /var/lib/fexerver; change --root below if you move it, and
-# add ReadWritePaths= for the new location
+# add ReadWritePaths= for the new location. 0770: the operators in the fexerver
+# group manage the roster in it, as themselves
 StateDirectory=fexerver
-StateDirectoryMode=0750
+StateDirectoryMode=0770
 WorkingDirectory=/var/lib/fexerver
 ExecStart=/usr/bin/fexerver serve --root /var/lib/fexerver --addr 0.0.0.0:4444 --window 120
 Restart=on-failure

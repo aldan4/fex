@@ -3,19 +3,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # fexerver, set up in one command: the service user, the root, the binaries, the
-# identity and the service file for whichever init this machine runs.
+# identity and the service file for whichever init this machine runs -- and you,
+# put in the service group, so that registering members afterwards needs
+# neither doas nor a chown.
 #
 #   doas ./packaging/install.sh --addr relay.example.net:4444
 #
 # It is safe to run twice: nothing already in place is touched, and an identity
 # that exists is never overwritten -- that file is the relay, and a new one would
 # make every member's card useless.
+#
+# Every file is made by the user who is to own it: the identity is generated as
+# the service user, straight into the root, so nothing is handed over afterwards.
 
 set -eu
 
 addr=""
 root=/var/lib/fexerver
 user=fexerver
+name=relay1
+operator=${DOAS_USER:-${SUDO_USER:-}}
 bindir=/usr/bin
 from=""
 dry=0
@@ -25,14 +32,18 @@ here=$(cd "$(dirname "$0")" && pwd)
 usage() {
 	cat <<'USAGE'
 usage:
-  install.sh --addr <host:port> [--root <path>] [--user <name>]
-             [--from <dir>] [--bin-dir <path>] [--dry-run]
+  install.sh --addr <host:port> [--name <relay>] [--root <path>] [--user <name>]
+             [--operator <login>] [--from <dir>] [--bin-dir <path>] [--dry-run]
 
   --addr <host:port>  the address members will dial -- your public one, not the
                       bind address. Required the first time: it is what the
                       relay's card carries.
+  --name <relay>      the relay's name, which its card carries and members file
+                      it under (default: relay1)
   --root <path>       relay root (default: /var/lib/fexerver)
   --user <name>       service user (default: fexerver)
+  --operator <login>  who manages the roster: put in the service group
+                      (default: whoever ran doas or sudo)
   --from <dir>        where fexerver and fex are (default: alongside this
                       script's zig-out, then the current directory)
   --bin-dir <path>    where to install them (default: /usr/bin)
@@ -51,11 +62,28 @@ run() {
 	fi
 }
 
+# one argument, single-quoted for sh -c
+quote() {
+	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# A command run as the service user. Its account is locked with nologin for a
+# shell, which su takes no notice of when given a shell of its own.
+as_user() {
+	cmd=exec
+	for a in "$@"; do cmd="$cmd $(quote "$a")"; done
+	run su -s /bin/sh -c "cd / && $cmd" "$user"
+}
+
+in_group() { id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "$2"; }
+
 while [ $# -gt 0 ]; do
 	case $1 in
 		--addr) [ $# -ge 2 ] || die "--addr needs a value"; addr=$2; shift 2 ;;
+		--name) [ $# -ge 2 ] || die "--name needs a value"; name=$2; shift 2 ;;
 		--root) [ $# -ge 2 ] || die "--root needs a value"; root=$2; shift 2 ;;
 		--user) [ $# -ge 2 ] || die "--user needs a value"; user=$2; shift 2 ;;
+		--operator) [ $# -ge 2 ] || die "--operator needs a value"; operator=$2; shift 2 ;;
 		--from) [ $# -ge 2 ] || die "--from needs a value"; from=$2; shift 2 ;;
 		--bin-dir) [ $# -ge 2 ] || die "--bin-dir needs a value"; bindir=$2; shift 2 ;;
 		--dry-run|-n) dry=1; shift ;;
@@ -112,14 +140,40 @@ else
 	die "no adduser or useradd here; create the user '$user' yourself and re-run"
 fi
 
+# -- the operator -------------------------------------------------------------
+#
+# The group is what lets you write the root: include and exclude replace
+# roster.danl whole, by a rename inside the root, so they need the directory and
+# nothing else -- and the relay only ever reads that file, whoever owns it.
+
+if [ -z "$operator" ] || [ "$operator" = root ]; then
+	say "no operator to add to $user: run this through doas or sudo, or say --operator <login>"
+	operator=""
+elif ! id "$operator" >/dev/null 2>&1; then
+	die "no such user '$operator' for --operator"
+elif in_group "$operator" "$user"; then
+	say "$operator is already in the $user group"
+	operator_ok=1
+else
+	say "adding $operator to the $user group"
+	if command -v usermod >/dev/null 2>&1; then
+		run usermod -aG "$user" "$operator"
+	else
+		run addgroup "$operator" "$user"
+	fi
+	operator_added=1
+fi
+
 # -- binaries and root --------------------------------------------------------
 
 say "installing fexerver and fex into $bindir"
 run install -m 0755 "$from/fexerver" "$bindir/fexerver"
 run install -m 0755 "$from/fex" "$bindir/fex"
 
-say "relay root $root, owned by $user, mode 0750"
-run install -d -o "$user" -g "$user" -m 0750 "$root"
+# 0770: the service user, and the operators in its group. Nobody else can
+# traverse it, so what the files inside say is moot.
+say "relay root $root, owned by $user, mode 0770"
+run install -d -o "$user" -g "$user" -m 0770 "$root"
 
 # -- the identity -------------------------------------------------------------
 #
@@ -130,12 +184,9 @@ if [ -f "$root/node.dano" ]; then
 	say "identity $root/node.dano is already there, left alone"
 else
 	[ -n "$addr" ] || die "no identity yet, so --addr <host:port> is needed to make one"
-	tmp=$(mktemp -d)
-	say "generating the relay identity for $addr"
-	run "$bindir/fex" generate relay1 --dir "$tmp" --addr "$addr" --intro "fex relay"
-	run install -o "$user" -g "$user" -m 0600 "$tmp/relay1.dano" "$root/node.dano"
-	run install -m 0644 "$tmp/relay1.card.danl" "$root/relay1.card.danl"
-	rm -rf "$tmp"
+	say "generating the relay identity for $addr, as $user"
+	as_user "$bindir/fex" generate "$name" --dir "$root" --addr "$addr" --intro "fex relay"
+	run mv "$root/$name.dano" "$root/node.dano"
 	card_made=1
 fi
 
@@ -165,19 +216,32 @@ case $init in
 		next="ln -s /etc/sv/fexerver /var/service/"
 		;;
 	*)
-		say "no init system recognised: run '$bindir/fexerver serve --root $root' yourself"
+		say "no init system recognised: run '$bindir/fexerver serve --root $root' as $user yourself"
 		next=""
 		;;
 esac
 
 echo
 say "done. what is left:"
-if [ -n "${card_made:-}" ]; then
-	echo "     the relay's card is $root/relay1.card.danl -- hand that to your members"
-fi
-echo "     register one:  doas fexerver include <their.card.danl> --root $root"
-echo "     see who is on: doas fexerver roster --root $root"
 if [ -n "$next" ]; then
 	echo "     start it:      $next"
+fi
+if [ -n "${operator_added:-}" ]; then
+	echo "     log in again, $operator: the $user group counts from the next login"
+fi
+if [ -n "${card_made:-}" ]; then
+	echo "     the relay's card is $root/$name.card.danl -- hand that to your members"
+fi
+if [ "$root" != /var/lib/fexerver ]; then
+	echo "     the root is not the default, so tell the commands where it is:"
+	echo "                    export FEXERVER_ROOT=$root"
+fi
+if [ -n "${operator_added:-}${operator_ok:-}" ]; then
+	echo "     register one:  fexerver include <their.card.danl>"
+	echo "       or remotely: ssh <this host> fexerver include < their.card.danl"
+	echo "     see who is on: fexerver roster"
+else
+	echo "     register one:  doas fexerver include <their.card.danl>"
+	echo "     see who is on: doas fexerver roster"
 fi
 exit 0

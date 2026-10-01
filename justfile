@@ -91,6 +91,7 @@ smoke: build-release-host
     addr="127.0.0.1:{{smoke_port}}"
     capsule="$demo/alice/self/notes@relay1/files"
     replica="$demo/alice2/self/notes@relay1/files"
+    top="$PWD"
     server=""
     cleanup() {
         if [ -n "$server" ]; then kill "$server" 2>/dev/null || true; fi
@@ -106,9 +107,12 @@ smoke: build-release-host
     echo "==> relay root, two client roots"
     mkdir -p "$demo/relay" "$demo/alice/keys" "$capsule/docs" "$demo/alice2/keys"
     cp "$demo/keys/relay1.dano"       "$demo/relay/node.dano"
-    # registration (#3, #6): the card, appended. A card is a roster record, so
-    # there is nothing to extract and nothing to rewrite
-    cat "$demo/keys/alice.card.danl" > "$demo/relay/roster.danl"
+    # registration (#3, #6): the card, piped in -- how it arrives over ssh. The
+    # root comes from the environment, as on a server with a non-default one
+    FEXERVER_ROOT="$demo/relay" {{bin}} include < "$demo/keys/alice.card.danl" | sed "s/^/    /"
+    # and from the current directory, once it holds an identity
+    (cd "$demo/relay" && "$top/{{bin}}" roster) | tee "$demo/out" | sed "s/^/    /"
+    grep -q "^alice  " "$demo/out"
     for root in alice alice2; do
         cp "$demo/keys/alice.dano"       "$demo/$root/keys/node.dano"
         cp "$demo/keys/relay1.card.danl" "$demo/$root/keys/relay1.relay.danl"
@@ -130,9 +134,10 @@ smoke: build-release-host
     {{client_bin}} publish --root "$demo/alice" | tee "$demo/out" | sed "s/^/    /"
     grep -q "as seq 1" "$demo/out"
 
-    echo "==> publish again is a no-op"
-    {{client_bin}} publish --root "$demo/alice" | tee "$demo/out" | sed "s/^/    /"
+    echo "==> publish again is a no-op, with the root found rather than named"
+    (cd "$demo/alice" && "$top/{{client_bin}}" publish) | tee "$demo/out" | sed "s/^/    /"
     grep -q "already published" "$demo/out"
+    FEX_ROOT="$demo/alice" {{client_bin}} publish | grep -q "already published"
 
     echo "==> what the relay holds, from a second root"
     {{client_bin}} inventory --root "$demo/alice2" --name notes | tee "$demo/out" | sed "s/^/    /"

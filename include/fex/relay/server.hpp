@@ -96,6 +96,15 @@ public:
             failed_at_ = std::move(what);
             return std::unexpected(e);
         };
+        // A root is served by the user it belongs to and nobody else: whatever
+        // the relay makes inside it -- objects/, capsules/, every staged upload
+        // -- is owned by whoever ran it, and a relay started once by hand as
+        // the wrong user leaves directories the service can no longer write.
+        // The operator, who may write the root to manage the roster, is told so
+        // here rather than finding out at the next restart.
+        if (struct ::stat st; ::stat(root_.c_str(), &st) == 0 && st.st_uid != ::geteuid())
+            return fail("serving " + root_ + ", which belongs to another user",
+                        std::errc::operation_not_permitted);
         const auto key_path = opts.key_path.empty() ? root_ + "/node.dano" : opts.key_path;
         auto self = read_identity(key_path.c_str());
         if (!self)

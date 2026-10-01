@@ -10,10 +10,13 @@
 
 #include <csignal>
 #include <cstdio>
+#include <expected>
 #include <print>
 #include <string>
 #include <string_view>
 #include <system_error>
+
+#include <unistd.h>
 
 namespace {
 
@@ -23,7 +26,7 @@ constexpr std::string_view usage =
     "usage:\n"
     "  fexerver serve [--root <path>] [--key <path>] [--addr <ip:port>]\n"
     "                 [--window <seconds>]\n"
-    "  fexerver include <card.danl> [--root <path>]\n"
+    "  fexerver include [<card.danl>] [--root <path>]\n"
     "  fexerver exclude <name> [--root <path>]\n"
     "  fexerver roster [--root <path>]\n"
     "  fexerver help | version\n"
@@ -31,7 +34,8 @@ constexpr std::string_view usage =
     "commands:\n"
     "  serve                 serve the relay until stopped\n"
     "  include <card.danl>   register the member whose card that is, under the\n"
-    "                        name the card carries\n"
+    "                        name the card carries; with no file the card is\n"
+    "                        read from stdin: ssh relay fexerver include < card\n"
     "  exclude <name>        take that member out of the registry; the capsule\n"
     "                        they published stays on disk\n"
     "  roster                who is registered\n"
@@ -42,7 +46,9 @@ constexpr std::string_view usage =
     "  -r, --root <path>     relay root: roster.danl, objects/ and capsules/\n"
     "                        live here. roster.danl is the registry and the\n"
     "                        published directory at once: one card per member\n"
-    "                        (default: current directory)\n"
+    "                        (default: $FEXERVER_ROOT, else the current\n"
+    "                        directory if it has node.dano, else\n"
+    "                        /var/lib/fexerver)\n"
     "  -k, --key <path>      node identity file (default: <root>/node.dano)\n"
     "  -a, --addr <ip:port>  address to listen on (default: 0.0.0.0:4444)\n"
     "  -w, --window <secs>   how far a direct peek's timestamp may stand from\n"
@@ -65,7 +71,20 @@ std::string message(std::errc code) {
 }
 
 std::string root_of(const flags::args& args) {
-    return args.get<std::string>("root", "r").value_or(std::string{"."});
+    return fex::relay::admin::resolve_root(
+        args.get<std::string>("root", "r").value_or(std::string{}));
+}
+
+// What `include` registers when it is given no file: the card piped in, so a
+// member is registered from another machine with nothing copied onto this one.
+std::expected<fex::identity_card, std::errc> card_from_stdin() {
+    std::string text;
+    char buf[4096];
+    while (const auto n = std::fread(buf, 1, sizeof buf, stdin))
+        text.append(buf, n);
+    if (std::ferror(stdin))
+        return std::unexpected(std::errc::io_error);
+    return fex::parse_identity_card(text);
 }
 
 fex::relay::server the_server;
@@ -111,11 +130,20 @@ int serve(const flags::args& args) {
 // the change up on the next request it serves -- there is nothing to restart
 // and no signal to send.
 int include(const flags::args& args) {
-    const auto card = args.get<std::string>(std::size_t{1});
-    if (!card)
-        return fail("include needs a card: fexerver include <card.danl>");
+    const auto file = args.get<std::string>(std::size_t{1});
+    if (!file && ::isatty(STDIN_FILENO))
+        return fail("include needs a card: fexerver include <card.danl>, "
+                    "or the card on stdin");
+    const auto card = file ? *file : std::string{"stdin"};
     const auto root = root_of(args);
-    const auto added = fex::relay::admin::include(root, card->c_str());
+    auto added = std::expected<fex::identity_card, std::errc>{};
+    if (file) {
+        added = fex::relay::admin::include(root, file->c_str());
+    } else if (const auto piped = card_from_stdin(); !piped) {
+        added = std::unexpected(piped.error());
+    } else {
+        added = fex::relay::admin::include(root, *piped);
+    }
     if (!added) {
         switch (added.error()) {
         case std::errc::file_exists:
@@ -126,10 +154,10 @@ int include(const flags::args& args) {
             return fail("{}/roster.danl holds a record this build does not know;\n"
                         "edit it by hand rather than let this rewrite it without", root);
         default:
-            return fail("cannot register {}: {}", *card, message(added.error()));
+            return fail("cannot register {} on {}: {}", card, root, message(added.error()));
         }
     }
-    std::println("registered {}{}", added->name,
+    std::println("registered {} on {}{}", added->name, root,
                  added->is_relay() ? " (a relay's card: it grants nothing yet)" : "");
     return exit_ok;
 }
@@ -148,10 +176,10 @@ int exclude(const flags::args& args) {
             return fail("{}/roster.danl holds a record this build does not know;\n"
                         "edit it by hand rather than let this rewrite it without", root);
         default:
-            return fail("cannot remove '{}': {}", *name, message(gone.error()));
+            return fail("cannot remove '{}' from {}: {}", *name, root, message(gone.error()));
         }
     }
-    std::println("removed {} -- capsules/{} is still on disk", *name, *name);
+    std::println("removed {} from {} -- capsules/{} is still on disk", *name, root, *name);
     return exit_ok;
 }
 

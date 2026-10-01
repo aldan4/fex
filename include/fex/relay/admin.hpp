@@ -12,6 +12,7 @@
 // The uniqueness rules of #3 live here because this is where the whole file is
 // in hand: no two records may carry one name or one key.
 
+#include <cstdlib>
 #include <expected>
 #include <string>
 #include <string_view>
@@ -29,8 +30,37 @@ namespace fex::relay::admin {
 
 inline constexpr ::mode_t roster_mode = 0644;
 
+// where the packaged services keep the relay
+inline constexpr std::string_view default_root = "/var/lib/fexerver";
+
 [[nodiscard]] inline std::string roster_path(std::string_view root) {
     return std::string{root} + "/roster.danl";
+}
+
+// The rule behind resolve_root, with everything it looks at handed in: the flag,
+// else $FEXERVER_ROOT, else the current directory when it is a relay root
+// already, else the packaged one -- so on a server every command finds the
+// relay with no flag at all, and a relay tried out in a directory is served
+// from inside it.
+[[nodiscard]] inline std::string
+choose_root(std::string_view flag, const char* env, bool cwd_is_root) {
+    std::string root;
+    if (!flag.empty())
+        root = flag;
+    else if (env != nullptr && *env != '\0')
+        root = env;
+    else if (cwd_is_root)
+        root = ".";
+    else
+        root = default_root;
+    while (root.size() > 1 && root.back() == '/')
+        root.pop_back();
+    return root;
+}
+
+[[nodiscard]] inline std::string resolve_root(std::string_view flag) {
+    return choose_root(flag, std::getenv("FEXERVER_ROOT"),
+                       fs::stat_of("node.dano").kind == fs::entry_kind::file);
 }
 
 namespace detail {
@@ -90,27 +120,33 @@ store(std::string_view root, roster::file r) noexcept {
 
 } // namespace detail
 
-// The card at `card_path`, added to the registry under the name it carries.
-// `file_exists` means that name is taken, `address_in_use` that the key is --
-// two names for one node would be two capsules for one member.
+// A card, added to the registry under the name it carries. `file_exists` means
+// that name is taken, `address_in_use` that the key is -- two names for one node
+// would be two capsules for one member.
+[[nodiscard]] inline std::expected<identity_card, std::errc>
+include(std::string_view root, const identity_card& card) noexcept {
+    auto reg = detail::load(root);
+    if (!reg)
+        return std::unexpected(reg.error());
+    for (const auto& e : reg->records) {
+        if (e.name == card.name)
+            return std::unexpected(std::errc::file_exists);
+        if (e.pub == card.pub)
+            return std::unexpected(std::errc::address_in_use);
+    }
+    reg->records.push_back(roster::record_of(card));
+    if (auto written = detail::store(root, std::move(*reg)); !written)
+        return std::unexpected(written.error());
+    return card;
+}
+
+// The card at `card_path`, the same way.
 [[nodiscard]] inline std::expected<identity_card, std::errc>
 include(std::string_view root, const char* card_path) noexcept {
     auto card = read_identity_card(card_path);
     if (!card)
         return std::unexpected(card.error());
-    auto reg = detail::load(root);
-    if (!reg)
-        return std::unexpected(reg.error());
-    for (const auto& e : reg->records) {
-        if (e.name == card->name)
-            return std::unexpected(std::errc::file_exists);
-        if (e.pub == card->pub)
-            return std::unexpected(std::errc::address_in_use);
-    }
-    reg->records.push_back(roster::record_of(*card));
-    if (auto written = detail::store(root, std::move(*reg)); !written)
-        return std::unexpected(written.error());
-    return *card;
+    return include(root, *card);
 }
 
 // And out again. The capsule stays on disk: what a member published is theirs,
@@ -227,6 +263,40 @@ SCENARIO("include and exclude are the registry, and the card is the line") {
     CHECK(relay::admin::exclude(root, "bob").error() == std::errc::not_supported);
 
     REQUIRE(fs::remove_tree(root).has_value());
+}
+
+SCENARIO("a card that never was a file -- what include reads from stdin") {
+    using namespace fex;
+    char tmpl[] = "/tmp/fex-admin-XXXXXX";
+    char* tmp = ::mkdtemp(tmpl);
+    REQUIRE(tmp != nullptr);
+    const std::string root{tmp};
+
+    const auto carol = generate_identity();
+    const auto text = to_danl(card_of(carol, "carol", {}, "piped in"));
+    const auto card = parse_identity_card(text);
+    REQUIRE(card.has_value());
+    REQUIRE(relay::admin::include(root, *card).has_value());
+    CHECK(relay::admin::include(root, *card).error() == std::errc::file_exists);
+
+    // the same line as a card read from a file would have written
+    const auto roster = fs::read_file(relay::admin::roster_path(root).c_str());
+    REQUIRE(roster.has_value());
+    CHECK(std::string_view{reinterpret_cast<const char*>(roster->data()), roster->size()}
+          == text);
+
+    // and an identity piped in place of a card is refused before anything else
+    CHECK_FALSE(parse_identity_card(to_dano(carol)).has_value());
+
+    REQUIRE(fs::remove_tree(root).has_value());
+}
+
+SCENARIO("the relay root: flag, environment, current directory, the packaged one") {
+    using fex::relay::admin::choose_root;
+    CHECK(choose_root("here/", "/env", true) == "here");
+    CHECK(choose_root("", "/env/", true) == "/env");
+    CHECK(choose_root("", "", true) == ".");
+    CHECK(choose_root("", nullptr, false) == "/var/lib/fexerver");
 }
 
 } // TEST_SUITE
