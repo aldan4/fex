@@ -50,8 +50,9 @@ Registries are danl streams, one line per node.
 relay:   roster.danl       -- the registry and the published directory (#6)
                               in one file: members have put/commit rights
                               and a capsule each
-client:  keys/relays.danl  -- the member's relays; lines are the relays'
-                              cards, which carry :addr by definition
+client:  keys/<relay>.relay.danl
+                           -- one file per relay, holding that relay's
+                              card, which carries :addr by definition
 ```
 
 - A relay's registry is the roster of #6, and a line of it is a card of this
@@ -66,6 +67,10 @@ client:  keys/relays.danl  -- the member's relays; lines are the relays'
 - The id -> node map is built from the registry and rebuilt whenever it
   changes; a relay re-reads the file when its mtime moves, and a file that
   fails to parse leaves the registry it is already serving in place.
+- A client keeps each relay's card in a file of its own, named after the
+  relay: `<relay>` is the file's name less `.relay.danl`. One such file is
+  the relay; with several, the client is told which one to use, and none,
+  or several with no choice made, is a configuration error.
 - Registry errors are the roster's own (#6), plus: two records carrying one
   `name` or one `pub`, two mapping to one id, and an id equal to zero. The
   duplicate rules live here rather than in #6's reader because deciding them
@@ -197,7 +202,7 @@ everything else is dropped.
 
 Per-side state:
 
-- client (durable): node key, `keys/relays.danl`;
+- client (durable): node key, the relay cards `keys/<relay>.relay.danl`;
 - relay (durable): node key, `roster.danl`, capsules;
 - relay (cache, may be lost): `{id -> addr}`, the peek nonce cache.
 
@@ -500,7 +505,7 @@ against the hash that named it before the rename puts it in place.
 <root>/
   keys/node.dano                -- identity
   keys/profile.dano             -- profile (optional)
-  keys/relays.danl              -- relay registry (#3)
+  keys/<relay>.relay.danl       -- relay card, one file per relay (#3)
   self/<name>@<relay>/          -- the capsule published to this relay
     files/                      -- the content, byte for byte
     files/inventory.danl        -- the relay's inventory as last known
@@ -520,9 +525,9 @@ against the hash that named it before the rename puts it in place.
 ```
 
 - `(relay, member, path) -> local path` is a fixed function of names:
-  `<relay>` is `:name` from `keys/relays.danl` for one's own relay and
-  `:name` from the own relay's roster for a federated one; `<member>` is
-  `:name` from that relay's roster.
+  `<relay>` is the name of its card file, `keys/<relay>.relay.danl`, for
+  one's own relay and `:name` from the own relay's roster for a federated
+  one; `<member>` is `:name` from that relay's roster.
 - `card.danl` pins identity: written on first contact from the registry
   line or roster record that introduced the node. A later roster naming a
   different pub under the same name is a hard stop with an explicit error,
