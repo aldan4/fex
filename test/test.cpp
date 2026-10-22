@@ -279,6 +279,27 @@ SCENARIO("end to end: publish, list, fetch, mutate, converge") {
         CHECK(*fs::read_file((cfg_b->files_dir + "/docs/x.txt").c_str()) == edited);
     }
 
+    // #9: the same key on a second root is a second device. Its commit at a seq
+    // the head has already passed is refused, and the client refuses to go
+    // round it: what seq 2 holds is nothing this commit saw
+    {
+        hash256 elsewhere{};
+        elsewhere[0] = 0x5a;
+        const auto lost = client::detail::commit_next(*req_b, 2, elsewhere);
+        REQUIRE(!lost.has_value());
+        CHECK(lost.error() == client::publish_conflict);
+        // and when what the head holds is this very inventory, it is the same
+        // publication arriving twice
+        const auto head = req_b->peek();
+        REQUIRE(head.has_value());
+        hash256 same;
+        std::copy(head->inv_hash, head->inv_hash + 32, same.begin());
+        const auto twice = client::detail::commit_next(*req_b, 1, same);
+        REQUIRE(twice.has_value());
+        CHECK(twice->unchanged);
+        CHECK(twice->seq == 2);
+    }
+
     // fetch deletes nothing: what left the inventory is still standing locally
     CHECK(fs::stat_of((cfg_b->files_dir + "/big.bin").c_str()).kind
           == fs::entry_kind::file);

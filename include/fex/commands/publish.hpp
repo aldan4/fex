@@ -31,6 +31,10 @@ inline int run(const flags::args& args) {
     std::string offending;
     const auto report = fex::client::publish(*req, cfg->files_dir, &offending);
     if (!report) {
+        if (report.error() == client::publish_conflict)
+            return fail("publish refused: the capsule moved on '{}' while this was "
+                        "uploading (another device published first); fetch what it "
+                        "sent, then publish again", cfg->relay_name);
         if (!offending.empty())
             return fail("publication refused by '{}': {}", offending,
                         message(report.error()));

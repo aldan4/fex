@@ -26,6 +26,11 @@
 
 namespace fex::client {
 
+// what publish returns when the capsule moved on the relay between the peek and
+// the commit: another node on this key committed first, and committing on top
+// would bury what it sent, because a publication replaces the capsule whole
+inline constexpr std::errc publish_conflict = std::errc::operation_canceled;
+
 struct publish_report {
     u64 seq = 0;
     bool unchanged = false;
@@ -139,6 +144,27 @@ send_commit(requester& r, u64 seq, const hash256& h) noexcept {
     return wire::mstatus_of(*mh);
 }
 
+// the commit of step 5, at the seq the run's peek promised. A stale_seq means
+// somebody committed while this was uploading: unless it committed this very
+// inventory, the capsule now holds what this run never saw, and it is not this
+// run's to overwrite -- publish_conflict, and nothing is committed
+[[nodiscard]] inline std::expected<publish_report, std::errc>
+commit_next(requester& r, u64 seq, const hash256& inv_hash) noexcept {
+    const auto status = send_commit(r, seq, inv_hash);
+    if (!status)
+        return std::unexpected(status.error());
+    if (*status == wire::mstatus::ok)
+        return publish_report{seq, false};
+    if (*status != wire::mstatus::stale_seq)
+        return std::unexpected(std::errc::protocol_error);
+    const auto fresh = r.peek();
+    if (!fresh)
+        return std::unexpected(fresh.error());
+    if (!std::equal(inv_hash.begin(), inv_hash.end(), fresh->inv_hash))
+        return std::unexpected(publish_conflict);
+    return publish_report{fresh->seq, true};
+}
+
 } // namespace detail
 
 [[nodiscard]] inline std::expected<publish_report, std::errc>
@@ -207,26 +233,13 @@ publish(requester& r, const std::string& files_dir,
             }
         }
 
-        // step 5: commit with the next seq; one refresh on stale_seq
-        u64 seq = head->seq + 1;
-        for (int tries = 0; tries != 2; ++tries) {
-            const auto status = detail::send_commit(r, seq, inv_hash);
-            if (!status)
-                return std::unexpected(status.error());
-            if (*status == wire::mstatus::ok) {
-                if (const auto kept = keep_inventory(fex::bytes{inv_bytes}); !kept)
-                    return std::unexpected(kept.error());
-                return publish_report{seq, false};
-            }
-            if (*status == wire::mstatus::stale_seq && tries == 0) {
-                const auto fresh = r.peek();
-                if (!fresh)
-                    return std::unexpected(fresh.error());
-                seq = fresh->seq + 1;
-                continue;
-            }
-            return std::unexpected(std::errc::protocol_error);
-        }
+        // step 5: commit with the next seq
+        const auto report = detail::commit_next(r, head->seq + 1, inv_hash);
+        if (!report)
+            return std::unexpected(report.error());
+        if (const auto kept = keep_inventory(fex::bytes{inv_bytes}); !kept)
+            return std::unexpected(kept.error());
+        return *report;
     }
     return std::unexpected(std::errc::bad_message); // restarts exhausted
 }
