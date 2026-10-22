@@ -164,10 +164,10 @@ aead valid - otherwise silent drop. Then:
 ```
 inner kind = peek, peer = 0 (the one exception to the addr rule):
     |now - time| <= W  and  nonce not in cache[id]
-        -> remember nonce, addr[id] := source, execute peek, reply
+        -> remember nonce, add source to addr[id], execute peek, reply
     otherwise silent drop
 
-inner is a request, source == addr[id]:
+inner is a request, source in addr[id]:
     sender in members:
         peer = 0            -> execute, reply with peer = 0
         peer in federation  -> re-encrypt under the federate's k,
@@ -176,14 +176,20 @@ inner is a request, source == addr[id]:
         execute in the read-only context (#5), reply,
         peer echoed byte-for-byte
 
-inner is a reply, source == addr[id], sender in federation:
+inner is a reply, source in addr[id], sender in federation:
     peer in members         -> re-encrypt under the member's k,
-                               peer := sender id, send to addr[peer];
+                               peer := sender id, send to the newest
+                               of addr[peer];
                                addr unknown -> drop
 
 anything else               -> silent drop
 ```
 
+- `addr[id]` is a small set, newest first, not one address: one key may
+  run on several devices, and each command may open a fresh socket. A peek
+  from a source already in the set moves it to the front; a full set drops
+  its oldest. The bound is the relay's choice (8 here); an address pushed
+  out costs its node one timeout and the peek that follows it.
 - When routing, a relay inspects only the inner kind byte; the plaintext is
   re-encrypted unchanged.
 - Direct peek replay protection: `time` is the sender's creation timestamp;
@@ -204,7 +210,7 @@ Per-side state:
 
 - client (durable): node key, the relay cards `keys/<relay>.relay.danl`;
 - relay (durable): node key, `roster.danl`, capsules;
-- relay (cache, may be lost): `{id -> addr}`, the peek nonce cache.
+- relay (cache, may be lost): `{id -> addrs}`, the peek nonce cache.
 
 ## 5. Inner layer
 

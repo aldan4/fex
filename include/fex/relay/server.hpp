@@ -62,7 +62,11 @@ class server {
     u64 last_collect_ns_ = 0;
     net::udp_socket sock_;
     net::poller poller_;
-    hash_map<u64, net::endpoint> addrs_; // the peek-learned cache
+    // the peek-learned cache: per id, the addresses its peeks confirmed, the
+    // newest first. Several, because one key may sit on several devices (or
+    // one device may open a socket a command) and a peek from one must not
+    // cut the others off mid-transfer
+    hash_map<u64, std::vector<net::endpoint>> addrs_;
     hash_map<u64, channel::key> keys_;
     hash_map<u64, capsule> capsules_;
     hash_map<u64, std::vector<seen_peek>> peeks_; // the peek nonce cache
@@ -78,6 +82,10 @@ class server {
     // a backstop, not a policy: a member peeking once a second fills a hundred
     // and twenty of these in a two-minute window
     static constexpr std::size_t max_peeks_per_id = 1024;
+    // how many confirmed addresses an id keeps; the oldest goes first. A
+    // client peeks again on any timeout, so an address pushed out costs it
+    // one retry, never the transfer
+    static constexpr std::size_t max_addrs_per_id = 8;
 
 public:
 
@@ -238,9 +246,8 @@ private:
         }
         if (!wire::is_request_kind(wire::mkind_of(*mh)))
             return; // a reply, or a kind this relay does not speak
-        const auto it = addrs_.find(h->id);
-        if (it == addrs_.end() || !(it->second == src))
-            return; // #4: the source must be the address a peek confirmed
+        if (!is_confirmed(h->id, src))
+            return; // #4: the source must be an address a peek confirmed
         on_request(*m, cmd, *mh, *k, src, now);
     }
 
@@ -347,6 +354,24 @@ private:
         return true;
     }
 
+    // #4: a peek's source joins the id's addresses, or moves to the front of
+    // them if it is already there
+    void confirm(u64 id, const net::endpoint& src) {
+        auto& known = addrs_[id];
+        const auto it = std::find(known.begin(), known.end(), src);
+        if (it != known.end())
+            known.erase(it);
+        else if (known.size() >= max_addrs_per_id)
+            known.pop_back();
+        known.insert(known.begin(), src);
+    }
+
+    [[nodiscard]] bool is_confirmed(u64 id, const net::endpoint& src) const noexcept {
+        const auto it = addrs_.find(id);
+        return it != addrs_.end()
+            && std::find(it->second.begin(), it->second.end(), src) != it->second.end();
+    }
+
     // peek (#4, #5): the head of a capsule, and on the direct leg the one packet
     // that need not come from the confirmed address -- it is what confirms it.
     // What stands in for the address rule is the window and the nonce cache.
@@ -361,7 +386,7 @@ private:
             return;
         if (!remember(h.id, h.nonce, now_s))
             return;
-        addrs_[h.id] = src;
+        confirm(h.id, src);
         // #5: target is always explicit, the requester's own capsule included;
         // one this relay does not hold is not_found with the rest zeroed
         wire::head msg{};
@@ -651,6 +676,39 @@ SCENARIO("server: peek -> head, request dispatch, drop rules") {
         REQUIRE(other->connect(addr).has_value());
         REQUIRE(other->send(fex::bytes{out.data(), sealed}).has_value());
         CHECK(!recv_within(*other, in, 200).has_value());
+    }
+    // #4: one key on two devices -- a second address's peek confirms it
+    // without taking the slot from the first, so both are served
+    {
+        auto other = net::udp_socket::open(net::family::v4);
+        REQUIRE(other.has_value());
+        REQUIRE(other->connect(addr).has_value());
+        std::array<fex::u8, wire::datagram_max> pk{};
+        const auto pn = make_peek(pk, k, id, id, now_s(), 0x515151);
+        REQUIRE(other->send(fex::bytes{pk.data(), pn}).has_value());
+        REQUIRE(recv_within(*other, in, 2000).has_value());
+        REQUIRE(other->send(fex::bytes{out.data(), sealed}).has_value());
+        CHECK(recv_within(*other, in, 2000).has_value());
+        REQUIRE(sock->send(fex::bytes{out.data(), sealed}).has_value());
+        CHECK(recv_within(*sock, in, 2000).has_value());
+
+        // the set is bounded: as many fresh addresses again push the oldest
+        // out, and it is dropped until it peeks once more
+        std::vector<net::udp_socket> crowd;
+        for (std::size_t i = 0; i < 8; ++i) {
+            auto c = net::udp_socket::open(net::family::v4);
+            REQUIRE(c.has_value());
+            REQUIRE(c->connect(addr).has_value());
+            const auto cn = make_peek(pk, k, id, id, now_s(), 0x520000 + i);
+            REQUIRE(c->send(fex::bytes{pk.data(), cn}).has_value());
+            REQUIRE(recv_within(*c, in, 2000).has_value());
+            crowd.push_back(std::move(*c));
+        }
+        REQUIRE(sock->send(fex::bytes{out.data(), sealed}).has_value());
+        CHECK(!recv_within(*sock, in, 200).has_value());
+        const auto again = make_peek(pk, k, id, id, now_s(), 0x535353);
+        REQUIRE(sock->send(fex::bytes{pk.data(), again}).has_value());
+        REQUIRE(recv_within(*sock, in, 2000).has_value());
     }
     // a bad version
     REQUIRE(sock->send(fex::bytes{out.data(), sealed}).has_value());
