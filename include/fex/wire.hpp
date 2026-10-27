@@ -37,8 +37,8 @@ inline constexpr std::size_t mprefix_size = 8;
 inline constexpr std::size_t peek_size = 24;
 inline constexpr std::size_t head_size = 56;
 inline constexpr std::size_t put_base = 56;
-inline constexpr std::size_t get_size = 48;
-inline constexpr std::size_t chunk_base = 16;
+inline constexpr std::size_t get_size = 56;
+inline constexpr std::size_t chunk_base = 24;
 inline constexpr std::size_t poll_size = 40;
 inline constexpr std::size_t gaps_base = 16;
 inline constexpr std::size_t commit_size = 48;
@@ -48,12 +48,15 @@ inline constexpr std::size_t roster_size = 48;
 
 // #5.1 chunks
 inline constexpr u64 chunk_data_size = 1024;
+// #5.3: the most chunks one get is answered with; the rest of a range is asked again
+inline constexpr u64 get_burst_max = 64;
 
 inline constexpr std::size_t gaps_max_count = (max_command - gaps_base) / 8;
 
 static_assert(max_command == 1184);
 static_assert(gaps_max_count == 146);
 static_assert(min_datagram == 48);
+static_assert(chunk_base + chunk_data_size <= max_command);
 
 // #4: one packet format, no outer kinds. `id` is the immediate sender; `peer`
 // is the other end of the route (0 = the packet is for the receiver itself).
@@ -207,13 +210,17 @@ struct put {
   bytes data; // view into the decoded buffer
 }; // put
 
+// #5.3: chunks from..to of one object, inclusive; the relay answers with up to
+// get_burst_max of them, starting at from
 struct get {
-  u64 chunk_no;
+  u64 from;
+  u64 to;
   u8 file_hash[32];
 }; // get
 
 struct chunk {
-  bytes data; // view into the decoded buffer; empty in error responses
+  u64 chunk_no; // which chunk of the object this is; zero in error responses
+  bytes data;   // view into the decoded buffer; empty in error responses
 }; // chunk
 
 struct poll {
@@ -298,17 +305,20 @@ inline std::size_t write_get(std::span<u8> out, mheader h, const get& m) noexcep
   if (out.size() < get_size)
     return 0;
   write_mprefix(out, h);
-  store_u64(out.data() + 8, m.chunk_no);
-  std::copy(m.file_hash, m.file_hash + 32, out.data() + 16);
+  store_u64(out.data() + 8, m.from);
+  store_u64(out.data() + 16, m.to);
+  std::copy(m.file_hash, m.file_hash + 32, out.data() + 24);
   return get_size;
 }
 
-inline std::size_t write_chunk(std::span<u8> out, mheader h, bytes data) noexcept {
+inline std::size_t write_chunk(std::span<u8> out, mheader h, u64 chunk_no,
+                               bytes data) noexcept {
   const std::size_t total = chunk_base + data.size();
   if (data.size() > chunk_data_size || out.size() < total)
     return 0;
   write_mprefix(out, h);
-  store_u64(out.data() + 8, data.size());
+  store_u64(out.data() + 8, chunk_no);
+  store_u64(out.data() + 16, data.size());
   std::copy(data.begin(), data.end(), out.data() + chunk_base);
   return total;
 }
@@ -407,18 +417,21 @@ inline std::optional<get> read_get(bytes plain) noexcept {
   if (plain.size() != get_size)
     return std::nullopt;
   get m;
-  m.chunk_no = load_u64(plain.data() + 8);
-  std::copy(plain.data() + 16, plain.data() + 48, m.file_hash);
+  m.from = load_u64(plain.data() + 8);
+  m.to = load_u64(plain.data() + 16);
+  if (m.to < m.from)
+    return std::nullopt; // an empty range is no request at all (#5.3)
+  std::copy(plain.data() + 24, plain.data() + 56, m.file_hash);
   return m;
 }
 
 inline std::optional<chunk> read_chunk(bytes plain) noexcept {
   if (plain.size() < chunk_base)
     return std::nullopt;
-  const u64 size = load_u64(plain.data() + 8);
+  const u64 size = load_u64(plain.data() + 16);
   if (size > chunk_data_size || plain.size() != chunk_base + size)
     return std::nullopt;
-  return chunk{plain.subspan(chunk_base)};
+  return chunk{load_u64(plain.data() + 8), plain.subspan(chunk_base)};
 }
 
 inline std::optional<poll> read_poll(bytes plain) noexcept {
@@ -629,15 +642,24 @@ SCENARIO("get/poll/commit/done roundtrip") {
     using namespace fex::wire;
     u8 buf[64];
     get g{};
-    g.chunk_no = 42;
+    g.from = 42;
+    g.to = 105;
     for (unsigned i = 0; i != 32; ++i)
         g.file_hash[i] = static_cast<u8>(i * 3);
     REQUIRE(write_get(buf, mheader_of(mkind::get, mstatus::ok, 1), g) == get_size);
     auto gb = read_get(bytes{buf, get_size});
     REQUIRE(gb.has_value());
-    CHECK(gb->chunk_no == 42);
+    CHECK(gb->from == 42);
+    CHECK(gb->to == 105);
     CHECK(std::equal(gb->file_hash, gb->file_hash + 32, g.file_hash));
     CHECK(!read_get(bytes{buf, get_size + 1}).has_value());
+    // a single chunk is from == to; to < from is no range and a drop
+    g.to = 42;
+    REQUIRE(write_get(buf, mheader_of(mkind::get, mstatus::ok, 1), g) == get_size);
+    CHECK(read_get(bytes{buf, get_size}).has_value());
+    g.to = 41;
+    REQUIRE(write_get(buf, mheader_of(mkind::get, mstatus::ok, 1), g) == get_size);
+    CHECK(!read_get(bytes{buf, get_size}).has_value());
 
     fex::wire::poll p{};
     for (unsigned i = 0; i != 32; ++i)
@@ -690,19 +712,21 @@ SCENARIO("chunk roundtrip and rejects") {
         data[i] = static_cast<u8>(i ^ 0x5a);
     std::array<u8, chunk_base + 1024> buf{};
     const auto h = mheader_of(mkind::chunk, mstatus::ok, 5);
-    const auto n = write_chunk(buf, h, bytes{data});
+    const auto n = write_chunk(buf, h, 77, bytes{data});
     REQUIRE(n == chunk_base + 1024);
     auto back = read_chunk(bytes{buf.data(), n});
     REQUIRE(back.has_value());
+    CHECK(back->chunk_no == 77);
     CHECK(std::equal(back->data.begin(), back->data.end(), data.begin()));
     // empty chunk (error responses carry no data)
-    REQUIRE(write_chunk(buf, h, bytes{}) == chunk_base);
+    REQUIRE(write_chunk(buf, h, 0, bytes{}) == chunk_base);
     CHECK(read_chunk(bytes{buf.data(), chunk_base})->data.empty());
     // size beyond 1024 or length mismatch -> drop
-    store_u64(buf.data() + 8, 1025);
+    store_u64(buf.data() + 16, 1025);
     CHECK(!read_chunk(bytes{buf.data(), chunk_base + 1025}).has_value());
-    store_u64(buf.data() + 8, 100);
+    store_u64(buf.data() + 16, 100);
     CHECK(!read_chunk(bytes{buf.data(), chunk_base + 99}).has_value());
+
 }
 
 SCENARIO("gaps roundtrip and boundary") {

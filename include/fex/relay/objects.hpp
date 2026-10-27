@@ -23,6 +23,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <dirent.h>
@@ -114,41 +115,64 @@ public:
         return fs::write_file_atomic(path_of(h), data).has_value();
     }
 
-    // get (#5): one chunk of the object, or not_found -- which is every reason
-    // at once, since a hash absent from here is simply not something this relay
-    // holds (#6)
-    [[nodiscard]] std::expected<std::size_t, wire::mstatus>
-    get_chunk(const wire::get& g, std::span<u8> out, u64 now_ns) noexcept {
+    // One object held open for the length of a get (#5.3): the burst of chunks
+    // that answers it reads from one descriptor rather than reopening per chunk.
+    // It lives on the stack of the request and is gone when the burst is sent.
+    class reader {
+        int fd_ = -1;
+        u64 size_ = 0;
+
+    public:
+
+        reader(int fd, u64 size) noexcept : fd_{fd}, size_{size} {}
+        reader(reader&& o) noexcept : fd_{std::exchange(o.fd_, -1)}, size_{o.size_} {}
+        reader& operator=(reader&&) = delete;
+        ~reader() {
+            if (fd_ >= 0)
+                ::close(fd_);
+        }
+
+        [[nodiscard]] u64 size() const noexcept { return size_; }
+
+        // chunk `no` into out, or not_found when it is past the end or unreadable
+        [[nodiscard]] std::expected<std::size_t, wire::mstatus>
+        chunk(u64 no, std::span<u8> out) const noexcept {
+            const auto z = wire::chunk_len(size_, no);
+            if (!z || out.size() < *z)
+                return std::unexpected(wire::mstatus::not_found);
+            std::size_t off = 0;
+            while (off != *z) {
+                const auto n = ::pread(fd_, out.data() + off, *z - off,
+                                       static_cast<off_t>(no * wire::chunk_data_size + off));
+                if (n < 0 && errno == EINTR)
+                    continue;
+                if (n <= 0)
+                    return std::unexpected(wire::mstatus::not_found);
+                off += static_cast<std::size_t>(n);
+            }
+            return *z;
+        }
+    }; // reader
+
+    // get (#5): the object opened for reading, or not_found -- which is every
+    // reason at once, since a hash absent from here is simply not something this
+    // relay holds (#6)
+    [[nodiscard]] std::expected<reader, wire::mstatus>
+    open_object(const u8 (&file_hash)[32], u64 now_ns) noexcept {
         hash256 h;
-        std::copy(g.file_hash, g.file_hash + 32, h.begin());
+        std::copy(file_hash, file_hash + 32, h.begin());
         const auto path = path_of(h);
         const auto st = fs::stat_of(path.c_str());
         if (st.kind != fs::entry_kind::file)
             return std::unexpected(wire::mstatus::not_found);
         if (!verified(h, path, st, now_ns))
             return std::unexpected(wire::mstatus::not_found);
-        const auto z = wire::chunk_len(st.size, g.chunk_no);
-        if (!z || out.size() < *z)
-            return std::unexpected(wire::mstatus::not_found);
         const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
         if (fd < 0)
             return std::unexpected(wire::mstatus::not_found);
-        std::size_t off = 0;
-        while (off != *z) {
-            const auto n = ::pread(fd, out.data() + off, *z - off,
-                                   static_cast<off_t>(g.chunk_no * wire::chunk_data_size
-                                                      + off));
-            if (n < 0 && errno == EINTR)
-                continue;
-            if (n <= 0) {
-                ::close(fd);
-                return std::unexpected(wire::mstatus::not_found);
-            }
-            off += static_cast<std::size_t>(n);
-        }
-        ::close(fd);
-        return *z;
+        return reader{fd, st.size};
     }
+
 
     // #6: an object no head and no staged commit names is garbage. Returns how
     // many were taken.

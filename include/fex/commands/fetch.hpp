@@ -59,12 +59,17 @@ inline int run(const flags::args& args) {
     const auto found = std::ranges::find(entries, *path, &fex::inventory::entry::path);
     if (found == entries.end())
         return fail("'{}' is not in the capsule as of seq {}", *path, state->seq);
+    const u64 started = fs::now_ns();
     const auto got = fex::client::fetch(*req, *found, cfg->files_dir, cfg->state_dir);
     if (!got)
         return fail("cannot fetch {}: {}", *path, message(got.error()));
-    if (*got)
+    if (*got && found->size != 0)
+        std::println("fetched {} ({} bytes, {}) into {}", *path, found->size,
+                     rate(found->size, fs::now_ns() - started), cfg->files_dir);
+    else if (*got)
         std::println("fetched {} ({} bytes) into {}", *path, found->size, cfg->files_dir);
     else
+
         std::println("{} is already up to date", *path);
     return exit_ok;
 }

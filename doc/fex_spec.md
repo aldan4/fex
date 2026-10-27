@@ -1,4 +1,4 @@
-# fex - capsule synchronization protocol (stage 1, revision 11, normative edition)
+# fex - capsule synchronization protocol (stage 1, revision 12, normative edition)
 
 ## 1. Model
 
@@ -233,8 +233,9 @@ The high bit of kind marks a reply; `status` is meaningful in replies and is
 0x80 head    prefix || seq:u64@8 || inv_size:u64@16 || inv_hash:b32@24   56
 0x01 put     prefix || file_size:u64@8 || chunk_no:u64@16 ||
              file_hash:b32@24 || data:b(z)@56                            56 + z
-0x02 get     prefix || chunk_no:u64@8 || file_hash:b32@16                48
-0x82 chunk   prefix || size:u64@8 || data:b(size)@16                     16 + size
+0x02 get     prefix || from:u64@8 || to:u64@16 || file_hash:b32@24       56
+0x82 chunk   prefix || chunk_no:u64@8 || size:u64@16 ||
+             data:b(size)@24                                             24 + size
 0x03 poll    prefix || file_hash:b32@8                                   40
 0x83 gaps    prefix || count:u64@8 || {from:u32, to:u32} x count @16     16 + 8*count
 0x04 commit  prefix || seq:u64@8 || inv_hash:b32@16                      48
@@ -243,11 +244,12 @@ The high bit of kind marks a reply; `status` is meaningful in replies and is
 0x85 roster  prefix || size:u64@8 || hash:b32@16                         48
 ```
 
-- Pairs: peek -> head, get -> chunk, poll -> gaps, commit -> done,
-  list -> roster; put has no reply.
+- Pairs: peek -> head, get -> chunk (a burst of them, #5.3), poll -> gaps,
+  commit -> done, list -> roster; put has no reply.
 - A datagram length that disagrees with the layout is a silent drop. An
   unknown inner kind is dropped without a reply.
-- chunk does not echo file_hash/chunk_no - matching is by req_id.
+- chunk does not echo file_hash - matching is by req_id; it does carry
+  chunk_no, which is what places it (#5.3).
 - Status codes: `0 ok`, `1 internal`, `2 not_found`, `3 stale_seq`,
   `4 files_missing`, `5 hash_mismatch`, `6 read_only`. A reply with a
   non-zero status keeps its fixed layout with the remaining fields zeroed
@@ -291,6 +293,25 @@ in the sender's own assembly area (in the read-only context, objects/ only);
 `hash_mismatch` - terminal, the file starts over; `not_found`; otherwise
 the ranges of missing chunks `{from, to}`, inclusive. If they do not all
 fit, the first count are sent; the client fills them in and repeats poll.
+
+### 5.3 get / chunk
+
+get asks for the chunks `from..to` of one object, inclusive (`to < from` -
+drop). The relay answers with a burst: one chunk per chunk number from `from`
+up to the first of `to`, the object's last chunk, and `from + 63` - at most
+64 chunks per get. Each chunk carries its own `chunk_no`, all of them the
+get's `req_id`, and they may arrive in any order or not at all; the relay
+remembers nothing about the burst once it is sent. An object absent from
+objects/, a `from` past its last chunk, or a read that fails is a single
+chunk with `not_found`, `chunk_no = 0` and no data.
+
+What did not arrive is asked for again. A client may keep several gets in
+flight and may give every get of one download the same `req_id`: a chunk
+names its place, so a late one from an earlier get is as good as an answer
+to the current one, and a duplicate is discarded. A client is expected to
+pace its gets to what arrives - grow the amount asked for while bursts come
+back whole and cut it when they do not - since a burst that overflows a
+queue on the way loses its tail.
 
 ## 6. Relay storage
 
@@ -477,9 +498,11 @@ fetch:   1-3 refresh
          6. a file already at files/<path> whose hash matches -> done, no
             download
          7. size = 0 -> create an empty file (hash must be hash(""))
-         8. get chunks into state/staging/<hash>, hashing as they arrive ->
-            verify -> rename into files/<path> (parent directories are
-            created)
+         8. get chunks into state/staging/<hash>, each written at its own
+            offset as it arrives, asking again for what did not (#5.3) ->
+            hash the whole file and verify -> rename into files/<path>
+            (parent directories are created)
+
 ```
 
 get/poll travel with the same `peer` as the peek that opened the read.

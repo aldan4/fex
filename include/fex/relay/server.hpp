@@ -149,6 +149,9 @@ public:
             return fail("binding " + opts.addr, r.error());
         if (auto r = sock_.set_nonblocking(true); !r)
             return fail("binding " + opts.addr, r.error());
+        // a get is answered with a burst (#5.3); a full buffer drops the tail,
+        // which the client asks for again, so this is best effort
+        (void)sock_.set_send_buffer_size(1 << 21);
         auto poller = net::poller::open();
         if (!poller)
             return fail("opening the poller", poller.error());
@@ -429,14 +432,7 @@ private:
             const auto g = wire::read_get(cmd);
             if (!g)
                 return;
-            std::array<u8, wire::chunk_data_size> data;
-            const auto got = objects_.get_chunk(*g, data, now_ns);
-            const auto status = got ? wire::mstatus::ok : got.error();
-            const auto body = got ? fex::bytes{data.data(), *got} : fex::bytes{};
-            reply_len = wire::write_chunk(
-                reply, wire::mheader_of(wire::mkind::chunk, status, req_id), body);
-            if (reply_len != 0)
-                respond(fex::bytes{reply.data(), reply_len}, k, src);
+            on_get(*g, req_id, k, src, now_ns);
             return;
         }
 
@@ -474,6 +470,40 @@ private:
         }
         if (reply_len != 0)
             respond(fex::bytes{reply.data(), reply_len}, k, src);
+    }
+
+    // get (#5.3): a burst of chunks, each naming its own number, from `from` up to
+    // `to`, the end of the object or get_burst_max of them, whichever comes first.
+    // Nothing about the burst is remembered: what the client did not receive it
+    // asks for again. Any failure -- an object this relay does not hold, a range
+    // starting past its end, a read that fails -- is one chunk carrying not_found.
+    void on_get(const wire::get& g, u64 req_id, const channel::key& k,
+                const net::endpoint& src, u64 now_ns) noexcept {
+        std::array<u8, wire::max_command> reply;
+        std::array<u8, wire::chunk_data_size> data;
+        const auto refuse = [&](wire::mstatus status) {
+            const auto n = wire::write_chunk(
+                reply, wire::mheader_of(wire::mkind::chunk, status, req_id), 0, {});
+            if (n != 0)
+                respond(fex::bytes{reply.data(), n}, k, src);
+        };
+        const auto obj = objects_.open_object(g.file_hash, now_ns);
+        if (!obj)
+            return refuse(obj.error());
+        const u64 count = wire::chunk_count(obj->size());
+        if (g.from >= count)
+            return refuse(wire::mstatus::not_found);
+        const u64 last = std::min({g.to, count - 1, g.from + (wire::get_burst_max - 1)});
+        for (u64 no = g.from; no <= last; ++no) {
+            const auto got = obj->chunk(no, data);
+            if (!got)
+                return refuse(got.error());
+            const auto n = wire::write_chunk(
+                reply, wire::mheader_of(wire::mkind::chunk, wire::mstatus::ok, req_id),
+                no, fex::bytes{data.data(), *got});
+            if (n != 0)
+                respond(fex::bytes{reply.data(), n}, k, src);
+        }
     }
 
     // #4: a reply names this relay as its sender and peer = 0 -- the packet is
@@ -650,8 +680,8 @@ SCENARIO("server: peek -> head, request dispatch, drop rules") {
 
     // get of an unknown hash -> chunk with not_found
     wire::get g{};
-    g.chunk_no = 0;
     for (auto& b : g.file_hash)
+
         b = 0x42;
     std::array<fex::u8, wire::get_size> cmd;
     REQUIRE(wire::write_get(cmd, wire::mheader_of(wire::mkind::get, wire::mstatus::ok,

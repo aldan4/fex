@@ -10,7 +10,9 @@
 
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <fex/client/config.hpp>
@@ -35,6 +37,16 @@ struct publish_report {
     u64 seq = 0;
     bool unchanged = false;
 }; // publish_report
+
+// one file of a publication, once the relay has all of it: what a caller that
+// reports progress is told, and how long the upload took
+struct uploaded {
+    std::string_view path;
+    u64 size = 0;
+    u64 elapsed_ns = 0;
+}; // uploaded
+
+using upload_observer = std::function<void(const uploaded&)>;
 
 namespace detail {
 
@@ -169,7 +181,8 @@ commit_next(requester& r, u64 seq, const hash256& inv_hash) noexcept {
 
 [[nodiscard]] inline std::expected<publish_report, std::errc>
 publish(requester& r, const std::string& files_dir,
-        std::string* offending = nullptr) noexcept {
+        std::string* offending = nullptr,
+        const upload_observer& on_upload = {}) noexcept {
     // What the relay now holds, kept where the member can read it (#10.1 step 6).
     // The commit is what publishes; this is a record of it, so a failure to write it
     // is reported and does not unmake what the relay has already accepted.
@@ -211,6 +224,7 @@ publish(requester& r, const std::string& files_dir,
                 restart = true; // the folder moved under us: retake the snapshot
                 break;
             }
+            const u64 started = fs::now_ns();
             const auto up = detail::upload_file(r, e.hash, fex::bytes{*data});
             if (!up) {
                 if (up.error() == std::errc::bad_message) {
@@ -219,6 +233,9 @@ publish(requester& r, const std::string& files_dir,
                 }
                 return std::unexpected(up.error());
             }
+            if (on_upload)
+                on_upload(uploaded{e.path, e.size, fs::now_ns() - started});
+
         }
         if (restart)
             continue;

@@ -11,6 +11,7 @@
 // The end-to-end scenario exercises the client against a live relay, so it
 // belongs to neither frontend: this is the only translation unit holding both.
 
+#include <atomic>
 #include <cstdlib>
 #include <thread>
 
@@ -219,7 +220,58 @@ SCENARIO("end to end: publish, list, fetch, mutate, converge") {
         CHECK(!*again);
     }
 
+    // #5.3: a get is a range, and the answer is a burst of numbered chunks -- at
+    // most get_burst_max of them, cut short by the end of the object; a range
+    // starting past the end is one not_found
+    {
+        const auto big_hash = crypto::ascon::hash256(fex::bytes{big});
+        const auto burst = [&](u64 from, u64 to, wire::mstatus& status) {
+            wire::get g{};
+            g.from = from;
+            g.to = to;
+            std::copy(big_hash.begin(), big_hash.end(), g.file_hash);
+            std::array<u8, wire::get_size> cmd;
+            const auto req = client::fresh_req_id();
+            const auto n = wire::write_get(
+                cmd, wire::mheader_of(wire::mkind::get, wire::mstatus::ok, req), g);
+            REQUIRE(req_b->cast(fex::bytes{cmd.data(), n}).has_value());
+            std::vector<u64> numbers;
+            std::array<u8, wire::max_command> reply;
+            status = wire::mstatus::ok;
+            while (const auto got = req_b->receive(req, reply, 300)) {
+                const auto mh = wire::read_mheader(fex::bytes{reply.data(), *got});
+                REQUIRE(mh.has_value());
+                REQUIRE(wire::mkind_of(*mh) == wire::mkind::chunk);
+                status = wire::mstatus_of(*mh);
+                const auto ch = wire::read_chunk(fex::bytes{reply.data(), *got});
+                REQUIRE(ch.has_value());
+                if (status != wire::mstatus::ok)
+                    break;
+                const auto at = ch->chunk_no * wire::chunk_data_size;
+                REQUIRE(ch->data.size() == *wire::chunk_len(big.size(), ch->chunk_no));
+                CHECK(std::equal(ch->data.begin(), ch->data.end(), big.begin() + at));
+                numbers.push_back(ch->chunk_no);
+            }
+            std::sort(numbers.begin(), numbers.end());
+            return numbers;
+        };
+        auto st = wire::mstatus::internal;
+        auto nums = burst(10, 5000, st); // capped at the burst
+        CHECK(st == wire::mstatus::ok);
+        REQUIRE(nums.size() == wire::get_burst_max);
+        CHECK(nums.front() == 10);
+        CHECK(nums.back() == 10 + wire::get_burst_max - 1);
+        nums = burst(1020, 5000, st); // cut by the end: 1025 chunks in all
+        CHECK(nums == std::vector<u64>{1020, 1021, 1022, 1023, 1024});
+        nums = burst(7, 7, st); // a single chunk
+        CHECK(nums == std::vector<u64>{7});
+        nums = burst(1025, 1030, st); // past the end
+        CHECK(nums.empty());
+        CHECK(st == wire::mstatus::not_found);
+    }
+
     // listing again keeps the inventory already on disk (same hash, no transfer)
+
     {
         const auto before = fs::stat_of(client::inventory_path(cfg_b->files_dir).c_str());
         auto second = client::refresh_inventory(*req_b, cfg_b->files_dir, cfg_b->state_dir);
@@ -357,8 +409,8 @@ inline std::optional<std::size_t> recv_within(fex::net::udp_socket& s,
 inline fex::wire::mstatus get_status(fex::client::requester& r, const fex::hash256& h) {
     using namespace fex;
     wire::get g{};
-    g.chunk_no = 0;
     std::copy(h.begin(), h.end(), g.file_hash);
+
     std::array<u8, wire::get_size> cmd;
     const auto n = wire::write_get(
         cmd, wire::mheader_of(wire::mkind::get, wire::mstatus::ok,
@@ -412,7 +464,107 @@ inline fex::hash256 head_hash(const fex::wire::head& h) {
 
 } // namespace fex_tenancy_test
 
+// #10.2 over a line that loses replies: a proxy between the member and the relay
+// passes every request and drops every seventh datagram coming back, so nearly
+// every round of a download loses something and has to ask for it again
+SCENARIO("fetch over a lossy line asks again for what it lost") {
+    using namespace fex;
+    using namespace fex_e2e_test;
+    char tmpl[] = "/tmp/fex-lossy-XXXXXX";
+    char* tmp = ::mkdtemp(tmpl);
+    REQUIRE(tmp != nullptr);
+    const std::string base{tmp};
+    const auto relay_root = base + "/relay";
+    const auto root_a = base + "/a";
+    const auto root_b = base + "/b";
+
+    const auto relay_id = generate_identity();
+    const auto alice = generate_identity();
+    REQUIRE(fs::ensure_dirs(relay_root).has_value());
+    REQUIRE(write_new_file((relay_root + "/node.dano").c_str(), to_dano(relay_id),
+                           identity_mode).has_value());
+    write_roster(relay_root, {{"alice", alice.pub}});
+    relay::server srv;
+    relay::options srv_opts;
+    srv_opts.root = relay_root;
+    srv_opts.addr = "127.0.0.1:0";
+    REQUIRE(srv.start(srv_opts).has_value());
+    const auto relay_addr = srv.local_addr();
+    std::thread runner{[&] { (void)srv.run(); }};
+
+    // the proxy: front faces the member, back is connected to the relay
+    auto front = net::udp_socket::open(net::family::v4);
+    auto back = net::udp_socket::open(net::family::v4);
+    REQUIRE(front.has_value());
+    REQUIRE(back.has_value());
+    REQUIRE(front->bind(*net::endpoint::parse("127.0.0.1:0")).has_value());
+    REQUIRE(back->connect(relay_addr).has_value());
+    (void)front->set_recv_buffer_size(1 << 21);
+    (void)back->set_recv_buffer_size(1 << 21);
+    const auto proxy_addr = front->local_endpoint();
+    REQUIRE(proxy_addr.has_value());
+    std::atomic<bool> stop{false};
+    std::atomic<u64> dropped{0};
+    std::thread proxy{[&] {
+        std::array<u8, 2048> buf;
+        net::endpoint member;
+        u64 replies = 0;
+        while (!stop.load()) {
+            ::pollfd pfd[2] = {{front->fd(), POLLIN, 0}, {back->fd(), POLLIN, 0}};
+            if (::poll(pfd, 2, 50) <= 0)
+                continue;
+            if (pfd[0].revents & POLLIN)
+                if (const auto n = front->recv_from(buf, member))
+                    (void)back->send(fex::bytes{buf.data(), *n});
+            if (pfd[1].revents & POLLIN)
+                if (const auto n = back->recv(buf)) {
+                    if (++replies % 7 == 0)
+                        dropped.fetch_add(1);
+                    else
+                        (void)front->send_to(fex::bytes{buf.data(), *n}, member);
+                }
+        }
+    }};
+
+    for (const auto& [root, addr] : {std::pair{root_a, relay_addr.to_string()},
+                                     std::pair{root_b, proxy_addr->to_string()}}) {
+        REQUIRE(fs::ensure_dirs(root + "/keys").has_value());
+        REQUIRE(write_new_file((root + "/keys/node.dano").c_str(), to_dano(alice),
+                               identity_mode).has_value());
+        REQUIRE(write_new_file((root + "/keys/hub.relay.danl").c_str(),
+                               to_danl(card_of(relay_id, "hub", addr)),
+                               identity_card_mode).has_value());
+    }
+    const auto capsule_a = root_a + "/self/mine@hub/files";
+    put_file(capsule_a + "/big.bin", pattern(1024 * 1024 + 137, 5));
+    put_file(capsule_a + "/small.bin", pattern(3000, 6));
+
+    auto cfg_a = client::load_config(root_a, "", "");
+    REQUIRE(cfg_a.has_value());
+    auto req_a = client::requester::connect(cfg_a->self, cfg_a->relay);
+    REQUIRE(req_a.has_value());
+    REQUIRE(client::publish(*req_a, cfg_a->files_dir).has_value());
+
+    auto cfg_b = client::load_config(root_b, "", "mine");
+    REQUIRE(cfg_b.has_value());
+    auto req_b = client::requester::connect(cfg_b->self, cfg_b->relay);
+    REQUIRE(req_b.has_value());
+    const auto state = client::refresh_inventory(*req_b, cfg_b->files_dir,
+                                                 cfg_b->state_dir);
+    REQUIRE(state.has_value());
+    fetch_all(*req_b, *state, cfg_b->files_dir, cfg_b->state_dir);
+    CHECK(tree_fingerprint(cfg_b->files_dir) == tree_fingerprint(capsule_a));
+    CHECK(dropped.load() > 100); // the line really did lose things
+
+    stop = true;
+    proxy.join();
+    srv.stop();
+    runner.join();
+    REQUIRE(fs::remove_tree(base).has_value());
+}
+
 SCENARIO("two members, one relay: separate capsules, one object store") {
+
     using namespace fex;
     using namespace fex_e2e_test;
     using namespace fex_tenancy_test;

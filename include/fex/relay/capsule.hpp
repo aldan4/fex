@@ -520,11 +520,16 @@ inline fex::wire::commit commit_of(fex::u64 seq, const fex::hash256& h) {
     return c;
 }
 
-inline fex::wire::get get_of(const fex::hash256& h, fex::u64 chunk_no) {
-    fex::wire::get g{};
-    g.chunk_no = chunk_no;
-    std::copy(h.begin(), h.end(), g.file_hash);
-    return g;
+// what a get of chunk `no` reads from the store: the object opened, then one chunk
+inline std::expected<std::size_t, fex::wire::mstatus>
+chunk_of(fex::relay::store& objects, const fex::hash256& h, fex::u64 no,
+         std::span<fex::u8> out, fex::u64 now_ns) {
+    fex::u8 raw[32];
+    std::copy(h.begin(), h.end(), raw);
+    const auto r = objects.open_object(raw, now_ns);
+    if (!r)
+        return std::unexpected(r.error());
+    return r->chunk(no, out);
 }
 
 // backdate an object so the day-old rules of #6 can be reached in a test
@@ -590,16 +595,16 @@ SCENARIO("capsule: publish, commit, and the objects it leaves") {
     // get is the store's business: file chunks and the inventory alike
     std::array<fex::u8, wire::chunk_data_size> buf;
     const auto now = fs::now_ns();
-    auto got = objects->get_chunk(get_of(ha, 2), buf, now);
+    auto got = chunk_of(*objects, ha, 2, buf, now);
     REQUIRE(got.has_value());
     CHECK(*got == 452);
     CHECK(std::equal(buf.begin(), buf.begin() + 452, a.begin() + 2048));
-    got = objects->get_chunk(get_of(hi, 0), buf, now);
+    got = chunk_of(*objects, hi, 0, buf, now);
     REQUIRE(got.has_value());
     CHECK(std::equal(buf.begin(), buf.begin() + *got, inv_bytes.begin()));
-    CHECK(objects->get_chunk(get_of(hi, 99), buf, now).error()
+    CHECK(chunk_of(*objects, hi, 99, buf, now).error()
           == wire::mstatus::not_found);
-    CHECK(objects->get_chunk(get_of(hash_of(pattern(7, 7)), 0), buf, now).error()
+    CHECK(chunk_of(*objects, hash_of(pattern(7, 7)), 0, buf, now).error()
           == wire::mstatus::not_found);
 
     // idempotent re-commit; stale seq
@@ -861,7 +866,8 @@ SCENARIO("store: collection takes what nothing pins") {
                                   fex::bytes{pattern(700, 4)}).has_value());
     age(objects->path_of(hb));
     std::array<fex::u8, wire::chunk_data_size> buf;
-    CHECK(objects->get_chunk(get_of(hb, 0), buf, fs::now_ns()).error()
+    CHECK(chunk_of(*objects, hb, 0, buf, fs::now_ns()).error()
+
           == wire::mstatus::not_found);
     CHECK(!objects->contains(hb));
 

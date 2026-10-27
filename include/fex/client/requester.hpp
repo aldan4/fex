@@ -39,6 +39,10 @@ struct net_options {
     int peek_timeout_ms = 1000;
     int peek_attempts = 3;
     int put_window = 64;           // puts sent between polls
+    int get_window_min = 64;       // #10.2: chunks asked for per round, at least...
+    int get_window_max = 1024;     // ...at most, growing on clean rounds
+    int get_quiet_min_ms = 20;     // a quiet line ends a round, after at least this
+
     int stall_rounds = 3;          // #10.1: rounds without progress -> abort
     int max_restarts = 3;          // #10.1: mismatch restarts -> abort
 }; // net_options
@@ -117,6 +121,7 @@ public:
             return std::unexpected(sock.error());
         r.sock_ = std::move(*sock);
         (void)r.sock_.set_send_buffer_size(1 << 20); // put windows, best effort
+        (void)r.sock_.set_recv_buffer_size(1 << 21); // get bursts, best effort
         if (auto c = r.sock_.connect(*ep); !c)
             return std::unexpected(c.error());
         return r;
@@ -156,10 +161,20 @@ public:
         return std::unexpected(std::errc::timed_out);
     }
 
-    // fire-and-forget (put)
+    // fire-and-forget (put), or one request of many whose replies are collected
+    // with receive (get, #5.3)
     [[nodiscard]] std::expected<void, std::errc> cast(fex::bytes cmd) noexcept {
         return send_request(cmd);
     }
+
+    // the next reply carrying this req_id, or nullopt when the timeout passes
+    // first. A get is answered with many replies under one req_id, so this is
+    // what reads a burst; nothing is resent here.
+    [[nodiscard]] std::optional<std::size_t>
+    receive(u64 req_id, std::span<u8> out, int timeout_ms) noexcept {
+        return await(req_id, out, timeout_ms);
+    }
+
 
     // one logical request: cmd carries its req_id already; the matching
     // response's plaintext lands in out

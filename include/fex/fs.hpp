@@ -269,7 +269,25 @@ open_new(const char* path, ::mode_t mode = 0644) noexcept {
     return {};
 }
 
+// the same at a given offset, for a download whose pieces arrive out of order
+[[nodiscard]] inline std::expected<void, std::errc>
+write_all_at(int fd, fex::bytes data, u64 at) noexcept {
+    std::size_t off = 0;
+    while (off != data.size()) {
+        const auto n = ::pwrite(fd, data.data() + off, data.size() - off,
+                                static_cast<off_t>(at + off));
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return failure();
+        }
+        off += static_cast<std::size_t>(n);
+    }
+    return {};
+}
+
 // depth-first removal of a file or directory tree; a missing root is success
+
 [[nodiscard]] inline std::expected<void, std::errc> remove_tree(const std::string& path) noexcept {
     const auto st = stat_of(path.c_str());
     switch (st.kind) {

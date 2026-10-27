@@ -29,7 +29,12 @@ inline int run(const flags::args& args) {
         return fail("cannot reach relay '{}' at {}: {}", cfg->relay_name,
                     cfg->relay.addr, message(req.error()));
     std::string offending;
-    const auto report = fex::client::publish(*req, cfg->files_dir, &offending);
+    const auto report = fex::client::publish(
+        *req, cfg->files_dir, &offending, [](const client::uploaded& u) {
+            std::println("uploaded {} ({} bytes, {})", u.path, u.size,
+                         rate(u.size, u.elapsed_ns));
+        });
+
     if (!report) {
         if (report.error() == client::publish_conflict)
             return fail("publish refused: the capsule moved on '{}' while this was "

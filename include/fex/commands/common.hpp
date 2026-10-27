@@ -35,6 +35,16 @@ inline std::string message(std::errc code) {
     return std::make_error_code(code).message();
 }
 
+// the average speed of a transfer of `size` bytes that took `ns`, for a person:
+// "412.3 KB/s", "6.8 MB/s"
+inline std::string rate(u64 size, u64 ns) {
+    const double per_s = double(size) * 1e9 / double(ns == 0 ? 1 : ns);
+    if (per_s >= 1024.0 * 1024.0)
+        return std::format("{:.1f} MB/s", per_s / (1024.0 * 1024.0));
+    return std::format("{:.1f} KB/s", per_s / 1024.0);
+}
+
+
 // --root/--relay/--name, with the discovery rules of #10.3 behind them
 inline std::expected<client::config, int> configure(const flags::args& args) {
     const auto root = args.get<std::string>("root", "r").value_or(std::string{});
